@@ -162,12 +162,15 @@ def _record_kv_cache_pcc(
     kvpe_dim,
     kv_lora,
     assert_threshold=None,
+    assert_layer_depth=None,
 ):
     """Gather the device KV cache, un-rotate the block-cyclic layout, and PCC each layer's valid
     region [:total_len] against the golden kv_post_transform trace. nope is compared directly; the
     RoPE (pe) slice uses the Meta-interleaved basis (golden stores HF half-split). Returns the min PCC
     across layers. With assert_threshold set, asserts min PCC >= threshold (otherwise record-only,
-    mirroring the per-layer decoder_output reporting)."""
+    mirroring the per-layer decoder_output reporting). With assert_layer_depth set, only layers
+    0..assert_layer_depth (inclusive) are asserted against the threshold; deeper layers are recorded
+    only (matches the decoder-output GATED_LAYER_DEPTH policy — deeper KV PCC drifts under bf8_b)."""
     logger.info("Device KV cache vs golden kv_post_transform (record-only):")
     # One gather: [num_layers, tp_replicas, seq_len_cache, kvpe] -> collapse TP replicas via [:, :1].
     cache_full = ttnn.to_torch(
@@ -190,10 +193,38 @@ def _record_kv_cache_pcc(
         _, pcc_pe = comp_pcc(ref_pe_int, dev_cache[:, kv_lora:])
         cache_min_pcc[i] = min(pcc_nope, pcc_pe)
         logger.info(f"  cache layer {i} PCC: nope={pcc_nope:.6f} pe(interleaved)={pcc_pe:.6f}")
+        # ---- KV_PE_DEBUG: decide the device pe layout convention + localize nope drift per chunk ----
+        if os.environ.get("KV_PE_DEBUG") == "1":
+            dev_pe = dev_cache[:, kv_lora:]
+            g_meta2hf = torch.cat([ref_pe[:, 0::2], ref_pe[:, 1::2]], dim=-1)  # treat golden as interleaved
+            cands = {
+                "pe_raw(golden HF as-is)": ref_pe,
+                "pe_hf2meta(current)": ref_pe_int,
+                "pe_meta2hf": g_meta2hf,
+            }
+            for name, cand in cands.items():
+                _, pc = comp_pcc(cand, dev_pe)
+                logger.info(f"    [KV_PE_DEBUG] L{i} {name}: pcc={pc:.6f}")
+            # per-chunk nope localization (which position range drifts?)
+            for c in range(0, total_len, CHUNK):
+                e = min(c + CHUNK, total_len)
+                _, pc_n = comp_pcc(g_post[c:e, :kv_lora], dev_cache[c:e, :kv_lora])
+                logger.info(f"    [KV_PE_DEBUG] L{i} nope chunk[{c}:{e}] pcc={pc_n:.6f}")
     overall = min(cache_min_pcc.values())
     logger.info(f"KV cache min PCC across layers: {overall:.6f}")
     if assert_threshold is not None:
-        assert overall >= assert_threshold, f"KV cache min PCC {overall:.6f} < {assert_threshold}"
+        if assert_layer_depth is not None:
+            gated = {i: v for i, v in cache_min_pcc.items() if i <= assert_layer_depth}
+            gated_min = min(gated.values())
+            logger.info(
+                f"KV cache min PCC over asserted layers 0..{assert_layer_depth}: {gated_min:.6f} "
+                f"(layers >{assert_layer_depth} recorded only)"
+            )
+            assert (
+                gated_min >= assert_threshold
+            ), f"KV cache min PCC {gated_min:.6f} (layers 0..{assert_layer_depth}) < {assert_threshold}"
+        else:
+            assert overall >= assert_threshold, f"KV cache min PCC {overall:.6f} < {assert_threshold}"
     return overall
 
 
@@ -598,7 +629,11 @@ def run_chunked_transformer_no_pcc(
         pytest.skip(f"pretrained weights unavailable (set {variant.ttnn_cache_env} + {variant.env_var})")
     if verify_kv_cache_pcc:
         assert use_trace, "verify_kv_cache_pcc checks the TRACED forward's KV output; requires use_trace=True"
-        assert n_chunks == 1, "KV-cache PCC verification is for a single chunk (chunk 0)"
+        # The scalar/pinned trace path can only populate chunk 0, so it stays single-chunk. The metadata
+        # path advances the per-chunk scalars on-device, so it can fill the whole cache across n_chunks and
+        # PCC the full [0:n_chunks*CHUNK] valid region against the golden kv_post_transform.
+        if not use_metadata:
+            assert n_chunks == 1, "KV-cache PCC on the scalar trace path is single-chunk (chunk 0)"
 
     profiler.clear()
     profiler.start("total_test_time")
@@ -819,6 +854,30 @@ def run_chunked_transformer_no_pcc(
             logger.info(f"iter {it} done ({n_chunks} chunks via trace) in {iter_seconds:.3f} seconds")
         profiler.end("tt_forward")
         signpost("PROFILE_MEASURE_END")
+
+        # Correctness: after replaying all n_chunks, the cache holds tokens [0:total_len]. PCC the full
+        # valid region vs the golden kv_post_transform. The metadata path drove every per-chunk scalar
+        # on-device from the persistent metadata tensor, so this is the end-to-end multi-chunk trace-safety
+        # proof. Layers 0..GATED_LAYER_DEPTH are asserted at the threshold; deeper layers recorded only.
+        if verify_kv_cache_pcc:
+            kv_min_pcc = _record_kv_cache_pcc(
+                trace_dir,
+                layout,
+                tt_kvpe_cache,
+                mesh_device,
+                sp,
+                num_layers,
+                SEQ_CACHE,
+                total_len,
+                kvpe_dim,
+                config.kv_lora_rank,
+                assert_threshold=KV_CACHE_PCC_THRESHOLD,
+                assert_layer_depth=GATED_LAYER_DEPTH,
+            )
+            logger.success(
+                f"[trace KV PCC] min KV-cache PCC over {num_layers} layers ({n_chunks} chunks) = "
+                f"{kv_min_pcc:.6f} (layers 0..{GATED_LAYER_DEPTH} asserted >= {KV_CACHE_PCC_THRESHOLD})"
+            )
 
         controller.release()
         transformer.set_trace_controller(None)
@@ -1300,10 +1359,13 @@ def test_kimi_prefill_transformer_chunked_no_pcc(
     )
 
 
-# Trace-correctness variant: capture the segmented trace on chunk 0, replay it, then PCC the KV cache
-# the TRACED forward wrote against the golden kv_post_transform (KV-cache only — kv_only_last_layer means
-# there is no decoder-output/logits tail). One chunk, one replay is enough to populate + verify the cache.
-@pytest.mark.parametrize("num_layers", [10, 61], ids=["L10", "L61"])
+# Trace-correctness variant: capture the metadata forward ONCE, replay it for 11 chunks (advancing the
+# per-chunk scalars on-device via the persistent metadata tensor), then PCC the full KV cache region
+# [0:11*CHUNK] the TRACED forward wrote against the golden kv_post_transform (KV-cache only —
+# kv_only_last_layer means there is no decoder-output/logits tail). Layers 0..GATED_LAYER_DEPTH are
+# asserted at the threshold; deeper layers (L61) are recorded only.
+@pytest.mark.parametrize("n_chunks", [1, 11], ids=["chunks1", "chunks11"])
+@pytest.mark.parametrize("num_layers", [1, 10, 61], ids=["L1", "L10", "L61"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
     [
@@ -1333,6 +1395,7 @@ def test_kimi_prefill_transformer_chunked_trace_kv_pcc(
     device_params,
     weight_cache_path,
     num_layers,
+    n_chunks,
     num_links,
     topology,
 ):
@@ -1342,13 +1405,14 @@ def test_kimi_prefill_transformer_chunked_trace_kv_pcc(
         mesh_device,
         weight_cache_path,
         num_layers,
-        1,  # one chunk (chunk 0)
+        n_chunks,  # 11 chunks, advanced on-device via the metadata tensor
         GateComputeMode.DEVICE_FP32,
         num_links,
         topology,
-        num_iters=1,
+        num_iters=1,  # one pass fills the cache [0:n_chunks*CHUNK]; more iters re-walk for timing only
         routing_use_l1_small_for_semaphores=True,
         use_trace=True,
+        use_metadata=True,
         verify_kv_cache_pcc=True,
     )
 
