@@ -33,6 +33,12 @@ struct RingJointSDPAParams {
     std::optional<std::uint32_t> kv_cache_batch_idx = std::nullopt;
     std::optional<std::uint32_t> kv_actual_isl = std::nullopt;
     uint32_t latent_v_head_dim = 0;
+    // (user, layer)-major KV-cache batch dim (metadata path). The SDPA + all-gather readers compute the
+    // cache slot on-device as metadata[0] * kv_cache_num_layers + kv_cache_layer_idx (mirrors
+    // update_padded_kv_cache). Defaults (1, 0) reduce to metadata[0], so existing callers are unaffected.
+    // Not hashed: like kv_cache_batch_idx, treated as a structural value baked into the per-layer program.
+    uint32_t kv_cache_num_layers = 1;
+    uint32_t kv_cache_layer_idx = 0;
 
     // We need a constructor, because all_gather_struct is not default initializable.
     RingJointSDPAParams(
@@ -51,7 +57,9 @@ struct RingJointSDPAParams {
         CoreCoord ccl_core_grid_offset,
         std::optional<std::uint32_t> kv_cache_batch_idx = std::nullopt,
         std::optional<std::uint32_t> kv_actual_isl = std::nullopt,
-        uint32_t latent_v_head_dim = 0) :
+        uint32_t latent_v_head_dim = 0,
+        uint32_t kv_cache_num_layers = 1,
+        uint32_t kv_cache_layer_idx = 0) :
         joint_strategy(std::move(joint_strategy)),
         scale(scale),
         is_causal(is_causal),
@@ -67,7 +75,9 @@ struct RingJointSDPAParams {
         ccl_core_grid_offset(ccl_core_grid_offset),
         kv_cache_batch_idx(kv_cache_batch_idx),
         kv_actual_isl(kv_actual_isl),
-        latent_v_head_dim(latent_v_head_dim) {}
+        latent_v_head_dim(latent_v_head_dim),
+        kv_cache_num_layers(kv_cache_num_layers),
+        kv_cache_layer_idx(kv_cache_layer_idx) {}
 
     auto attributes() const {
         using ttsl::reflection::Attribute;
@@ -88,6 +98,12 @@ struct RingJointSDPAParams {
             attrs.emplace_back("kv_actual_isl", kv_actual_isl.value());
         }
         attrs.emplace_back("latent_v_head_dim", latent_v_head_dim);
+        if (kv_cache_num_layers != 1) {
+            attrs.emplace_back("kv_cache_num_layers", kv_cache_num_layers);
+        }
+        if (kv_cache_layer_idx != 0) {
+            attrs.emplace_back("kv_cache_layer_idx", kv_cache_layer_idx);
+        }
         if (scale.has_value()) {
             attrs.emplace_back("scale", scale);
         }

@@ -127,7 +127,9 @@ void ring_attention_all_gather_async_multi_core_with_workers_helper(
     std::optional<uint32_t> input_batch_slice_idx,
     std::optional<uint32_t> gather_valid_Ht,
     std::optional<Tensor> metadata,
-    uint32_t chunk_local_tiles) {
+    uint32_t chunk_local_tiles,
+    uint32_t kv_cache_num_layers,
+    uint32_t kv_cache_layer_idx) {
     using tt::tt_metal::CBDescriptor;
     using tt::tt_metal::CBFormatDescriptor;
     using tt::tt_metal::KernelDescriptor;
@@ -562,6 +564,9 @@ void ring_attention_all_gather_async_multi_core_with_workers_helper(
         if (has_metadata) {
             reader_forward_rt_args.push_back(metadata->buffer());
             reader_forward_rt_args.push_back(chunk_local_tiles);
+            // (user, layer)-major slot factor; read by the reader right after chunk_local_tiles.
+            reader_forward_rt_args.push_back(kv_cache_num_layers);
+            reader_forward_rt_args.push_back(kv_cache_layer_idx);
         }
         if (fuse_op) {
             std::vector<uint32_t> reader_forward_signaler_args;
@@ -586,6 +591,9 @@ void ring_attention_all_gather_async_multi_core_with_workers_helper(
         if (has_metadata) {
             reader_backward_rt_args.push_back(metadata->buffer());
             reader_backward_rt_args.push_back(chunk_local_tiles);
+            // (user, layer)-major slot factor; read by the reader right after chunk_local_tiles.
+            reader_backward_rt_args.push_back(kv_cache_num_layers);
+            reader_backward_rt_args.push_back(kv_cache_layer_idx);
         }
         if (fuse_op) {
             std::vector<uint32_t> reader_backward_signaler_args;

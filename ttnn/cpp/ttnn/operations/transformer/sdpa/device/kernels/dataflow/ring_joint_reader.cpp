@@ -363,7 +363,15 @@ void kernel_main() {
         meta_noc.async_read_barrier();
         CoreLocalMem<volatile uint32_t> meta(meta_l1);
         if constexpr (slot_from_metadata) {
-            kv_cache_batch_idx = meta[0];  // metadata[0] = slot_id
+            // The KV-cache batch dim is (user, layer)-major:
+            //   cache_batch_idx = slot_id * kv_cache_num_layers + kv_cache_layer_idx
+            // (matches update_padded_kv_cache's writer: batch_idx = slot_idx * num_layers + layer_idx).
+            // metadata[0] holds only slot_id (= cache_user_id); the per-layer factor comes from common
+            // runtime args 1/2. Defaults (num_layers=1, layer_idx=0) reduce this to slot_id, keeping
+            // single-layer callers bit-identical to the original meta[0] behavior.
+            const uint32_t kv_cache_num_layers = get_common_arg_val<uint32_t>(1);
+            const uint32_t kv_cache_layer_idx = get_common_arg_val<uint32_t>(2);
+            kv_cache_batch_idx = meta[0] * kv_cache_num_layers + kv_cache_layer_idx;  // metadata[0] = slot_id
         }
         if constexpr (kv_pad_from_metadata) {
             // metadata[1] = actual_start = kv_actual_isl (tile-aligned). Derive the per-chunk values the

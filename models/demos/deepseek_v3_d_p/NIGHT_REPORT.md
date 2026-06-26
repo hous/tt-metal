@@ -100,3 +100,15 @@ ring_mla(metadata) at Kimi dims.
 metadata path; in the all-gather reader AND SDPA reader compute `slot = metadata[0]*num_layers +
 cache_layer_idx` (mirror update_padded_kv_cache). Defaults (stride=1, offset=0) keep existing callers
 bit-identical. Then re-run L1/L10/L61 KV PCC. Kernel change ⇒ ttnncpp rebuild + .so refresh.
+
+### FIX IMPLEMENTED + VERIFIED ✅
+Added `kv_cache_num_layers` (default 1) + `kv_cache_layer_idx` (default 0) to ring_mla, threaded through
+ring_joint_sdpa device op + program factory + the fused all-gather helper to BOTH readers
+(SDPA `ring_joint_reader.cpp`, all-gather `ring_attention_all_gather_reader.cpp`); slot now
+`meta[0]*num_layers + layer_idx`. Hashed (one program/layer — trace-safe, each layer captures own trace).
+mla.py `_chunked_attn` metadata branch passes `kv_cache_num_layers=self.layer_num,
+kv_cache_layer_idx=cache_layer_idx`. 12 files; ttnncpp+ttnn(nanobind) rebuilt + .so refreshed.
+- Per-op `test_ring_mla_metadata_matches_scalar_{rotation,indexed}`: **5 PASS** (defaults 1/0 → bit-identical).
+- **L10 single-chunk metadata: PASS, min PCC 0.993906** (all layers nope 0.99+, pe 0.9999) — matches the
+  historical 0.9939. The pe=0.77 anomaly was downstream of the slot bug; gone now.
+Next: L10 11-chunk (the deliverable) + L61.

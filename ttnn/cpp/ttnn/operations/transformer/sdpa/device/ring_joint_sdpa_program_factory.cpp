@@ -2289,7 +2289,14 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     // proven update_padded_kv_cache pattern. The address is constant across chunks (persistent tensor),
     // so a captured trace replays correctly without re-patching.
     if (slot_from_metadata) {
-        reader_kernel.emplace_common_runtime_args({tensor_args.metadata->buffer()->address()});
+        // Common arg 0: metadata DRAM address (reader reads slot_id = metadata[0]).
+        // Common args 1/2: (user, layer)-major KV-cache batch factor, so the reader computes the slot as
+        // metadata[0] * kv_cache_num_layers + kv_cache_layer_idx (matches update_padded_kv_cache). These
+        // are structural per-layer constants -- one program per layer -- so they're set once at create
+        // time and need no per-dispatch re-patch (a captured trace replays correctly). Defaults (1, 0)
+        // reduce the slot to metadata[0], keeping single-layer callers bit-identical.
+        reader_kernel.emplace_common_runtime_args(
+            {tensor_args.metadata->buffer()->address(), args.kv_cache_num_layers, args.kv_cache_layer_idx});
     }
 
     KernelDescriptor writer_kernel{};
@@ -2512,7 +2519,11 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
         compute_gather_valid_Ht(args, tensor_args),
         tensor_args.metadata,
         // chunk_local_tiles: per-device Q slab in tiles, for the reader's on-device gather-extent recompute.
-        tensor_args.input_q.padded_shape()[2] / tt::constants::TILE_HEIGHT);
+        tensor_args.input_q.padded_shape()[2] / tt::constants::TILE_HEIGHT,
+        // (user, layer)-major KV-cache batch factor: the all-gather reader computes the gathered slot as
+        // metadata[0] * kv_cache_num_layers + kv_cache_layer_idx. Defaults (1, 0) keep callers unaffected.
+        args.kv_cache_num_layers,
+        args.kv_cache_layer_idx);
 
     return desc;
 }

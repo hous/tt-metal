@@ -678,7 +678,15 @@ class ttMLA:
         # placeholder = global cache capacity (a safe upper bound) so no host actual_start is needed and
         # the runner can hand in just the metadata tensor. Otherwise pass the host scalars + true logical_n.
         if metadata is not None:
-            meta_slot_kwargs = {"metadata": metadata}
+            # metadata[0] holds only the user slot (cache_user_id). The KV-cache batch dim is
+            # (user, layer)-major (cache_batch_idx = slot * layer_num + cache_layer_idx), so pass the
+            # per-layer factor through so the readers recompute the full slot on-device -- otherwise every
+            # layer would read layer 0's KV cache.
+            meta_slot_kwargs = {
+                "metadata": metadata,
+                "kv_cache_num_layers": self.layer_num,
+                "kv_cache_layer_idx": cache_layer_idx,
+            }
             ring_logical_n = kvpe_cache.shape[2] * self.sp_factor  # global cache capacity
         else:
             meta_slot_kwargs = {"kv_cache_batch_idx": cache_batch_idx, "kv_actual_isl": kv_actual_isl}
