@@ -48,13 +48,27 @@ class SubDeviceTraceController:
     _TRACE = "trace"
     _LOAD = "load"
     _CLEAR = "clear"
+    _ACK = "ack"  # per-layer migration ack (host shm bump): split the capture here, call the callback at replay
 
     def __init__(self, mesh_device, cq_id=0):
         self.mesh_device = mesh_device
         self.cq_id = cq_id
-        self._program = []  # ordered list of (kind, payload): (_TRACE, tid) | (_LOAD, mgr_id) | (_CLEAR, None)
+        self._program = []  # ordered (kind, payload): (_TRACE, tid)|(_LOAD, mgr_id)|(_CLEAR, None)|(_ACK, layer_idx)
         self._current_tid = None
         self._capturing = False
+        # Optional per-layer ack callback (runner: layer_ack_channel.inject(1)). When set, MLA routes its
+        # on_layer_complete through layer_ack() so the migration ack stays correct under trace replay: the
+        # capture splits the trace at the ack point (a host shm bump cannot be inside a trace), and replay
+        # calls the callback BETWEEN the two trace segments (after the first segment's KV writes flush,
+        # before the next). None => no ack boundaries (test path: pure sub-device-swap segmentation).
+        self._on_layer_complete = None
+
+    def set_layer_ack_callback(self, on_layer_complete):
+        """Register the per-layer migration-ack callback. See layer_ack()."""
+        self._on_layer_complete = on_layer_complete
+
+    def has_layer_ack(self):
+        return self._on_layer_complete is not None
 
     # ------------------------------------------------------------------ capture
     def begin_capture(self):
@@ -87,14 +101,29 @@ class SubDeviceTraceController:
         else:
             self.mesh_device.clear_loaded_sub_device_manager()
 
+    def layer_ack(self, layer_idx):
+        """MLA finished this layer's KV write (post zero-pad). Capturing -> split + record the ack
+        boundary (NO host action during capture: the capture pass is not a real chunk, so we must not
+        bump the ack counter). Eager (not capturing) -> call the callback directly (matches the
+        non-trace runner). At replay the ack callback fires between the two trace segments. No-op if no
+        callback is registered."""
+        if self._on_layer_complete is None:
+            return
+        if self._capturing:
+            self._split(self._ACK, layer_idx)
+        else:
+            self._on_layer_complete(layer_idx)
+
     def _split(self, kind, payload):
-        # Close the current segment, perform the real host action, open the next segment.
+        # Close the current segment, perform the real host action (load/clear only; ACK has no
+        # capture-time action), open the next segment.
         ttnn.end_trace_capture(self.mesh_device, self._current_tid, cq_id=self.cq_id)
         self._program.append((self._TRACE, self._current_tid))
         if kind == self._LOAD:
             self.mesh_device.load_sub_device_manager(payload)
-        else:
+        elif kind == self._CLEAR:
             self.mesh_device.clear_loaded_sub_device_manager()
+        # kind == _ACK: no host action at capture time (the ack fires at replay, between segments).
         self._program.append((kind, payload))
         self._current_tid = ttnn.begin_trace_capture(self.mesh_device, cq_id=self.cq_id)
 
@@ -105,11 +134,15 @@ class SubDeviceTraceController:
         assert self._program, "nothing captured"
         for kind, payload in self._program:
             if kind == self._TRACE:
+                # blocking=True: the segment's KV writes are on-device before the next step (the ack's
+                # migration worker reads the cache, so it must see post-write data).
                 ttnn.execute_trace(self.mesh_device, payload, cq_id=self.cq_id, blocking=True)
             elif kind == self._LOAD:
                 self.mesh_device.load_sub_device_manager(payload)
-            else:  # _CLEAR
+            elif kind == self._CLEAR:
                 self.mesh_device.clear_loaded_sub_device_manager()
+            else:  # _ACK: per-layer migration ack, fired between segments (callback set => non-None here)
+                self._on_layer_complete(payload)
 
     # ------------------------------------------------------------------ stats / cleanup
     @property

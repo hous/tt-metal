@@ -376,11 +376,15 @@ class TtPrefillBlock(LightweightModule):
         )
 
     def set_trace_controller(self, controller):
-        """Forward a SubDeviceTraceController to this block's MoE (no-op for dense / kv-only blocks,
-        whose FFN has no sub-device overlap to trace around)."""
+        """Forward a SubDeviceTraceController to this block's MoE (sub-device-swap segmentation) and to
+        its MLA (per-layer migration-ack segmentation; only acts when the controller carries an ack
+        callback). No-op for dense / kv-only FFNs, whose FFN has no sub-device overlap to trace around."""
         ffn = getattr(self, "ffn", None)
         if ffn is not None and hasattr(ffn, "set_trace_controller"):
             ffn.set_trace_controller(controller)
+        mla = getattr(self, "mla", None)
+        if mla is not None and hasattr(mla, "set_trace_controller"):
+            mla.set_trace_controller(controller)
 
     def release_sub_device_managers(self):
         """Remove this block's MoE overlap sub-device manager before mesh close (no-op otherwise)."""

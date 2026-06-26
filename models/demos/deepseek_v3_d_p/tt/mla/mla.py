@@ -236,6 +236,10 @@ class ttMLA:
         self.config = config
         self.mesh_device = mesh_device
         self.layer_idx = layer_idx
+        # Trace controller for the per-layer migration-ack boundary (runner trace path). Set via
+        # set_trace_controller(); only acts when the controller carries an ack callback. None by default
+        # (single-shot / test paths), in which case the ack site falls back to the direct call.
+        self._trace_controller = None
         self.kv_only = kv_only
         self.is_balanced = is_balanced
         self.weight_cache_path = weight_cache_path
@@ -528,6 +532,12 @@ class ttMLA:
             exp_approx_mode=False,
         )
 
+    def set_trace_controller(self, controller):
+        """Register the SubDeviceTraceController so the per-layer migration ack can be chopped out of the
+        captured trace (runner trace path). The ack only fires through the controller when the controller
+        carries an ack callback (has_layer_ack()); otherwise the ack site falls back to the direct call."""
+        self._trace_controller = controller
+
     def _apply_rope_padded(
         self, t: ttnn.Tensor, rope_tensors: dict, kv_actual_isl: int, metadata: Optional[ttnn.Tensor] = None
     ) -> ttnn.Tensor:
@@ -660,10 +670,20 @@ class ttMLA:
                     self.sp_axis,
                 )
             # on_layer_complete hands this layer's KV to the migration worker, which reads the cache
-            # over NoC out-of-band from the ttnn command queue. Flush the (async) zero op to device
-            # first, else the worker can copy pre-zero (stale pad) data.
-            # ttnn.synchronize_device(self.mesh_device)
-            # on_layer_complete(self.layer_idx)
+            # over NoC out-of-band from the ttnn command queue. The zero op above must be on-device
+            # before the worker copies, else it can read pre-zero (stale pad) data.
+            # Trace path: route through the controller. At capture it splits the trace here (a host shm
+            # bump cannot live inside a trace); at replay the controller fires the ack between the two
+            # segments, after the first segment's writes flush (execute_trace blocking). Non-trace:
+            # synchronize then call directly. The controller takes precedence iff it carries an ack
+            # callback (runner trace path); the test path sets a controller WITHOUT an ack callback, so
+            # has_layer_ack() is False (and on_layer_complete is None there, so neither fires).
+            tc = getattr(self, "_trace_controller", None)
+            if tc is not None and tc.has_layer_ack():
+                tc.layer_ack(self.layer_idx)
+            elif on_layer_complete is not None:
+                ttnn.synchronize_device(self.mesh_device)
+                on_layer_complete(self.layer_idx)
 
         # K and V are the single latent kvpe cache (V = first kv_lora_rank columns, materialized
         # in-op). logical_n = prior valid length + this chunk; cache_batch_idx selects this
@@ -1115,8 +1135,13 @@ class ttMLA:
                     chunk_size_global,
                     self.sp_axis,
                 )
-            # ttnn.synchronize_device(self.mesh_device)
-            # on_layer_complete(self.layer_idx)
+            # Per-layer migration ack — same trace-safe routing as _chunked_attn (see comment there).
+            tc = getattr(self, "_trace_controller", None)
+            if tc is not None and tc.has_layer_ack():
+                tc.layer_ack(self.layer_idx)
+            elif on_layer_complete is not None:
+                ttnn.synchronize_device(self.mesh_device)
+                on_layer_complete(self.layer_idx)
 
         signpost(header="MLA_END")
         return None

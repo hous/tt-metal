@@ -112,3 +112,21 @@ kv_cache_layer_idx=cache_layer_idx`. 12 files; ttnncpp+ttnn(nanobind) rebuilt + 
 - **L10 single-chunk metadata: PASS, min PCC 0.993906** (all layers nope 0.99+, pe 0.9999) — matches the
   historical 0.9939. The pe=0.77 anomaly was downstream of the slot bug; gone now.
 Next: L10 11-chunk (the deliverable) + L61.
+
+### PHASE B RESULTS (post-fix) ✅
+- **L10 11-chunk metadata KV PCC: PASS, min 0.994096** (all 10 layers nope 0.99+, pe 0.9999) — the full
+  56320-token cache matches golden across 11 chunks via ONE captured metadata trace. Deliverable met.
+- **L61 11-chunk metadata KV PCC: PASS** (600s). Asserted layers 0-10 min 0.993545; full 61-layer min
+  0.966851 (deep layers L59/60 nope ~0.97 = bf8 depth accumulation, healthy); pe all 0.998+. The full
+  61-layer KV cache matches golden across 11 chunks via ONE captured metadata trace.
+Committed: 10cea053409 (the fix) + 3fb9d4573c7 (WIP test scaffold + root cause).
+
+**PHASE B DONE ✅** — both L10 and L61 11-chunk metadata KV-PCC pass; ring_mla per-layer slot bug fixed.
+
+### Phase C — runner traced loop (gated PREFILL_USE_TRACE) — IN PROGRESS
+Foundation done (Python, no device): extended `SubDeviceTraceController` with a per-layer ack boundary
+(`set_layer_ack_callback`/`has_layer_ack`/`layer_ack`; capture splits w/o injecting, replay injects
+between segments); `mla.py` both ack sites (_chunked_attn, _forward_kv_only) route through the controller
+when it carries an ack callback, else direct sync+call (test path: controller has no ack cb → unchanged);
+wired `set_trace_controller` transformer→block→MLA. Remaining: pipeline metadata-trace path with
+persistent inbound tensors + runner PREFILL_USE_TRACE gate, then standalone KV-PCC validation.
