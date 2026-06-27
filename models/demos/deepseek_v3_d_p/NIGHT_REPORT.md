@@ -123,6 +123,23 @@ Committed: 10cea053409 (the fix) + 3fb9d4573c7 (WIP test scaffold + root cause).
 
 **PHASE B DONE ✅** — both L10 and L61 11-chunk metadata KV-PCC pass; ring_mla per-layer slot bug fixed.
 
+### PHASE D DONE ✅ — request loop e2e over H2D socket + ack chopping + KV PCC
+Ran producer (`prefill_h2d_producer`, 11 longbook chunks over the socket) + runner
+(`PREFILL_USE_TRACE=1 PREFILL_REQUEST_LOOP_PCC=1`, kimi L10, 1 user, migration ack channel registered).
+- All 11 chunks replayed via the metadata trace; per-layer ack chopping ENGAGED (request mode registers a
+  LayerAck channel → migration=True → capture splits at each ack, replay injects between segments).
+- **KV cache PCC PASSED: slot0 min 0.994096** (== Phase B/C), clean "Shutdown complete".
+- Confirms: persistent inbound (socket tt_tokens → held `_trace_input` via `ttnn.copy`, no shape issue),
+  metadata trace replay, ack chopping correctness (a bad chop would corrupt the trace → wrong KV), socket path.
+- Producer needed NO change (already reads longbook tokens from trace metadata.json). Gotcha: the request-mode
+  validator reads `DEEPSEEK_PREFILL_TRACE_DIR` (NOT `PREFILL_TRACE_DIR`) and needs the `vllm-kimi-...` SUBDIR
+  (where kv_cache/ + metadata.json live) — set it to `.../kimi_longbook_56320/vllm-kimi-k26-b783c42e-56321tok`.
+  (Migration WORKER not run — out of scope; the runner correctly fires the acks/counter.)
+
+## ALL FIVE PHASES COMPLETE ✅  (A baseline, B 11-chunk KV PCC L10+L61, C gated runner trace,
+## D request-loop e2e, E ring_mla perf). Primary win: root-caused + fixed the ring_mla metadata
+## per-layer cache-slot bug (commit 10cea053409) that collapsed deep-layer KV on the metadata path.
+
 ### Phase C — runner traced loop (gated PREFILL_USE_TRACE) — IN PROGRESS
 Foundation done (Python, no device): extended `SubDeviceTraceController` with a per-layer ack boundary
 (`set_layer_ack_callback`/`has_layer_ack`/`layer_ack`; capture splits w/o injecting, replay injects
