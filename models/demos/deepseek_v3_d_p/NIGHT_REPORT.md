@@ -130,3 +130,24 @@ between segments); `mla.py` both ack sites (_chunked_attn, _forward_kv_only) rou
 when it carries an ack callback, else direct sync+call (test path: controller has no ack cb → unchanged);
 wired `set_trace_controller` transformer→block→MLA. Remaining: pipeline metadata-trace path with
 persistent inbound tensors + runner PREFILL_USE_TRACE gate, then standalone KV-PCC validation.
+
+### PHASE C DONE ✅ (commit 1419c4a4c14)
+Pipeline `use_metadata_trace` + lazy `_capture_metadata_trace` (persistent `_trace_input`+`_trace_metadata`,
+metadata warmup, controller chops MoE swaps + per-layer acks); `prefill()` metadata branch ttnn.copy's the
+fresh inbound tokens into the held `_trace_input` (so inbound persistence is automatic — no socket-op change
+needed) + builds `[slot,start,end,0]` into `_trace_metadata`, replays. Runner: `PREFILL_USE_TRACE` gate +
+256MB trace region (new `open_mesh_device(trace_region_size=)`).
+**Validated:** standalone `PREFILL_USE_TRACE=1` (kimi L10, 11 chunks, 1 user) → 17 seg / 7.31MB,
+KV cache min PCC **0.994096** (== Phase B test), exit 0. Teardown TT_THROW (SubDeviceManagerTracker /
+remote-only mesh) is benign (caught; exit 0).
+Note: migration-ack chopping engages only with a registered LayerAck channel (Phase D / migration on);
+standalone has migration=False so it's the pure metadata+sub-device-swap trace.
+
+### PHASE E DONE ✅ — ring_mla device kernel time, metadata vs scalar, per topology, 32 devices
+Driver: `tests/perf/ring_mla_metadata_perf.py` (runs test_mla_chunked_prefill kimi func 8x4 under tracy,
+parses per-device RingJointSDPA between MLA_START/MLA_END). Results in `ring_mla_perf.log`:
+- **line:** scalar 3364.63us vs metadata 3405.76us worst-device mean → **+1.2%** (range ~3281-3405 / 32 dev)
+- **ring:** scalar 3340.89us vs metadata 3364.40us → **+0.7%** (range ~3280-3364 / 32 dev)
+Both topologies ran (ring NOT skipped). Metadata overhead **<5%** on both → no debugging needed: the
+on-device metadata derivation (slot/logical_nt/masks) is negligible. (scenario production-50k+5k =
+11 chunk-aligned calls with growing KV; worst-device mean over the 11 calls.)
