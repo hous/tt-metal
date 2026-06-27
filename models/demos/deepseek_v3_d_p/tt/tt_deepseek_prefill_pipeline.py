@@ -57,6 +57,14 @@ class TtPrefillPipelineConfig:
     # replay re-runs the captured chunk-0 inputs (multi-chunk tracing is deferred). Needs the mesh
     # opened with trace_region_size > 0.
     use_trace: bool = False
+    # When True, capture the chunk forward ONCE as a METADATA-driven ttnn trace and replay it for every
+    # chunk (and every user/slot). Unlike `use_trace` (chunk-0-pinned scalar), the per-chunk scalars
+    # (slot_id / actual_start / actual_end) are NOT baked: the trace-safe MLA ops read them on-device from
+    # a persistent metadata DRAM tensor that prefill() updates in-place per chunk, so one capture serves
+    # the whole request stream. The per-layer migration ack (if a LayerAck channel is registered) is
+    # chopped out of the trace by the controller and fired between segments at replay. Requires
+    # kv_only_last_layer + trace_region_size > 0. Gated by PREFILL_USE_TRACE in the runner.
+    use_metadata_trace: bool = False
 
     @property
     def sp_factor(self) -> int:
@@ -83,15 +91,22 @@ class TtDeepSeekPrefillPipeline:
         # Segmented-trace controller + its persistent (chunk-0) input, populated in compile() when use_trace.
         self._trace_controller = None
         self._trace_input = None
+        # Metadata-trace path (use_metadata_trace): persistent metadata DRAM tensor + lazy-capture flag.
+        # Capture happens on the FIRST prefill() (so a LayerAck channel registered after compile() is
+        # already wired into the controller before capture). Both persistent tensors are then reused
+        # (updated in-place per chunk) across every replay.
+        self._trace_metadata = None
+        self._metadata_trace_captured = False
 
         assert (
             config.max_seq_len % config.chunk_size == 0
         ), f"max_seq_len ({config.max_seq_len}) must be a multiple of chunk_size ({config.chunk_size})"
-        if config.use_trace:
+        if config.use_trace or config.use_metadata_trace:
             assert config.kv_only_last_layer, (
-                "use_trace requires kv_only_last_layer=True: trace capture needs a device-only forward, "
-                "and kv_only_last_layer is what strips the host-side LM head + sampling tail."
+                "use_trace/use_metadata_trace requires kv_only_last_layer=True: trace capture needs a "
+                "device-only forward, and kv_only_last_layer strips the host-side LM head + sampling tail."
             )
+        assert not (config.use_trace and config.use_metadata_trace), "pick one trace path"
 
         self.model_built = False
         self.kv_cache_allocated = False
@@ -239,6 +254,71 @@ class TtDeepSeekPrefillPipeline:
             f"trace segments, {trace_bytes / (1024 * 1024):.2f} MB ({trace_bytes:,} bytes)"
         )
 
+    def _capture_metadata_trace(self) -> None:
+        """Lazily capture the metadata-driven forward ONCE (on the first prefill, after any LayerAck
+        channel is registered). Allocates the persistent token + metadata buffers, compiles the metadata
+        op variants (a metadata warmup — distinct program hash from the scalar path), then captures the
+        forward with the controller chopping at MoE sub-device swaps AND (if migration is on) at each
+        per-layer ack. The per-chunk scalars are NOT baked: replay reads them from the persistent metadata
+        tensor that prefill() updates in-place. See utils/sub_device_trace.py."""
+        import torch
+
+        chunk = self.config.chunk_size
+        # Persistent buffers — created ONCE, reused (updated in-place) across every replay, so the
+        # addresses the capture recorded stay valid.
+        self._trace_input = prepare_prefill_input_tensor(
+            [0] * chunk, self.mesh_device, self.config.sp_factor, False, self.config.mesh_shape, self.config.sp_axis
+        )
+        self._trace_metadata = ttnn.from_torch(
+            torch.tensor([0, 0, chunk, 0], dtype=torch.int64).reshape(1, 1, 1, 4),
+            device=self.mesh_device,
+            dtype=ttnn.uint32,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+        )
+        self._trace_controller = SubDeviceTraceController(self.mesh_device)
+
+        migration = self._on_layer_complete is not None
+
+        def _fwd(on_layer_complete):
+            # actual_start/end=None: every per-chunk scalar comes from `metadata` on-device.
+            self.model.forward(
+                self._trace_input,
+                self.kvpe_cache,
+                number_of_non_padded_tokens=chunk,
+                on_layer_complete=on_layer_complete,
+                actual_start=None,
+                actual_end=None,
+                cache_user_id=0,
+                metadata=self._trace_metadata,
+            )
+
+        # WARMUP (controller idle, NO ack callback yet so has_layer_ack() is False -> the ack site uses
+        # the on_layer_complete branch). For migration we pass a NO-OP callback so zero_padded_kv_cache
+        # still compiles (it is gated on on_layer_complete is not None) without bumping the real ack
+        # counter during warmup. Then we register the REAL ack callback for capture.
+        self.model.set_trace_controller(self._trace_controller)
+        warmup_olc = (lambda _idx: None) if migration else None
+        _fwd(warmup_olc)
+        ttnn.synchronize_device(self.mesh_device)
+
+        if migration:
+            self._trace_controller.set_layer_ack_callback(self._on_layer_complete)
+
+        logger.info(f"[trace] capturing {self.config.num_layers}-layer metadata forward (migration={migration})...")
+        self._trace_controller.begin_capture()
+        _fwd(self._on_layer_complete if migration else None)
+        self._trace_controller.end_capture()
+        ttnn.synchronize_device(self.mesh_device)
+        self._metadata_trace_captured = True
+
+        trace_bytes = self._trace_controller.trace_bytes()
+        logger.info(
+            f"[trace] metadata forward = {self._trace_controller.num_segments} segments, "
+            f"{trace_bytes / (1024 * 1024):.2f} MB"
+        )
+
     def prefill(
         self,
         input_tensor: ttnn.Tensor,
@@ -276,6 +356,29 @@ class TtDeepSeekPrefillPipeline:
         assert (
             actual_start <= actual_end <= actual_start + self.config.chunk_size
         ), f"[actual_start={actual_start}, actual_end={actual_end}) not within one chunk of {self.config.chunk_size}"
+
+        if self.config.use_metadata_trace:
+            # Metadata-driven trace replay: one capture serves every chunk AND every user/slot. Update the
+            # two persistent buffers in-place — this chunk's tokens into _trace_input, this chunk's
+            # [slot_id, actual_start, actual_end, 0] into _trace_metadata — then replay. The trace-safe
+            # MLA ops read the per-chunk scalars from _trace_metadata on-device; the controller fires the
+            # per-layer migration ack between segments (if registered). NEVER realloc these buffers (a
+            # fresh allocation would land at a different address and the replay would read freed memory).
+            import torch
+
+            if not self._metadata_trace_captured:
+                self._capture_metadata_trace()
+            ttnn.copy(input_tensor, self._trace_input)  # device->device into the persistent buffer
+            ttnn.deallocate(input_tensor)
+            meta_host = ttnn.from_torch(
+                torch.tensor([slot_id, actual_start, actual_end, 0], dtype=torch.int64).reshape(1, 1, 1, 4),
+                dtype=ttnn.uint32,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+            )
+            ttnn.copy_host_to_device_tensor(meta_host, self._trace_metadata)
+            self._trace_controller.replay()
+            return
 
         if self.config.use_trace:
             # Replay the captured (segmented) forward. PINNED TO CHUNK 0: it re-runs the chunk-0 inputs
@@ -328,6 +431,9 @@ class TtDeepSeekPrefillPipeline:
         if self._trace_input is not None:
             ttnn.deallocate(self._trace_input)
             self._trace_input = None
+        if self._trace_metadata is not None:
+            ttnn.deallocate(self._trace_metadata)
+            self._trace_metadata = None
         self.model.release_sub_device_managers()
 
     def __del__(self):
