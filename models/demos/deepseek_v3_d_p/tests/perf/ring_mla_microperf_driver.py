@@ -10,7 +10,7 @@ from tracy.process_model_log import get_latest_ops_log_filename
 from models.perf.device_perf_utils import run_device_perf
 
 TEST = "models/demos/deepseek_v3_d_p/tests/perf/test_ring_mla_microperf.py::test_ring_mla_microperf[auto]"
-KV_SIZES = [64, 256, 1024]
+KV_SIZES = [256, 1024, 5120]
 WARMUP = 6  # drop first N calls per (device,mode,kv) region
 DUR = "DEVICE KERNEL DURATION [ns]"
 R = int(sys.argv[1]) if len(sys.argv) > 1 else 3

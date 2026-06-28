@@ -13,8 +13,14 @@ from tracy import signpost
 
 import tests.nightly.blackhole.sdpa.test_ring_joint_sdpa as T
 
+import os
+
 N_ITERS = 30  # calls per mode (driver drops a warmup prefix, takes the median of the rest)
-KV_SIZES = [64, 256, 1024]  # prior-KV tile-multiples; small ones expose the fixed metadata-read overhead
+# prior-KV tile-multiples. 256 exposes the fixed metadata-read overhead; 5120 = the real prefill chunk.
+KV_SIZES = [256, 1024, 5120]
+# META_L1=1 places the metadata tensor in L1 (vs DRAM) to test whether the fixed per-call overhead is
+# DRAM-read-latency / bank-contention bound.
+_META_MEM = ttnn.L1_MEMORY_CONFIG if os.environ.get("META_L1") == "1" else ttnn.DRAM_MEMORY_CONFIG
 
 
 def _build(runtime, kv_actual_isl):
@@ -65,7 +71,11 @@ def _build(runtime, kv_actual_isl):
     pc = ttnn.SDPAProgramConfig(
         compute_with_storage_grid_size=runtime.sdpa_compute_grid, q_chunk_size=32, k_chunk_size=32, exp_approx_mode=False
     )
-    tt_meta = T._make_ring_mla_metadata(mesh_device, slot_id=0, actual_start=kv_actual_isl, actual_end=logical_n)
+    tt_meta = ttnn.from_torch(
+        torch.tensor([0, kv_actual_isl, logical_n, 0], dtype=torch.int64).reshape(1, 1, 1, 4),
+        device=mesh_device, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT,
+        memory_config=_META_MEM, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+    )
     return tt_q, tt_kv, pbuf, pc, tt_meta, logical_n, d_v
 
 
