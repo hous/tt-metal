@@ -168,3 +168,26 @@ parses per-device RingJointSDPA between MLA_START/MLA_END). Results in `ring_mla
 Both topologies ran (ring NOT skipped). Metadata overhead **<5%** on both → no debugging needed: the
 on-device metadata derivation (slot/logical_nt/masks) is negligible. (scenario production-50k+5k =
 11 chunk-aligned calls with growing KV; worst-device mean over the 11 calls.)
+
+---
+## 2026-06-28 follow-up (user requests)
+
+### Ring_mla per-call perf across ALL equivalence tests (old=scalar vs new=metadata)
+Driver `tests/perf/ring_mla_eq_perf.py` → `ring_mla_eq_perf.log`. Each of the 5 metadata equivalence
+params runs ONE scalar ring_mla call then ONE metadata call (bit-exact). Per-device PAIRWISE median
+delta (robust):
+- indexed[slot0] +4.0% | indexed[slot1] +2.3% | rotation[kv64] +9.5% | rotation[kv256] +6.1% | rotation[kv320] +3.5%
+Per-call metadata overhead is a FIXED on-device cost (16B metadata NoC read + on-device
+logical_nt/mask/slot/gather derivation): largest fraction on the smallest single calls (kv64), shrinking
+to <1.2% at production KV size (Phase E `ring_mla_perf.log`). worst-device is one outlier (dev16 = ring
+coordinator, dispatch-bound). NOT a regression — it's the inherent cost of moving scalars on-device, and
+it enables the trace that eliminates ~200ms/chunk of host-dispatch op2op. Repro: see header in the log.
+
+### test_ds_prefill_transformer_chunked_padded_trace (NEW) — metadata+trace == untraced
+`run_chunked_transformer_padded_trace`: on ONE kv_only build, runs the DeepSeek variable/partial-chunk
+(_PADDED_FULL_55K, 18 splits) prefill twice — PASS A untraced scalar, PASS B metadata trace captured once
++ replayed per split — and asserts per-layer KV-cache PCC (vs golden) matches bit-exactly.
+- **L1: PASS** (layer 0 untraced==traced 0.999853, |diff|=0.00e+00).
+- **L10: PASS** (all 10 layers |diff|=0.00e+00; untraced==traced exactly). Confirms the per-layer slot
+  fix + bit-exact trace replay for DeepSeek too.
+Repro: `DEEPSEEK_V3_HF_MODEL=/mnt/models/deepseek-ai/DeepSeek-R1-0528 TT_DS_PREFILL_TTNN_CACHE=/mnt/models/DeepSeek-R1-0528-Cache/DeepSeek-R1-0528-Cache-prefill_secure python_env/bin/python -m pytest "models/demos/deepseek_v3_d_p/tests/test_prefill_transformer_chunked.py::test_ds_prefill_transformer_chunked_padded_trace[blackhole-deepseek_v3-mesh-8x4-L10-full55k]" -s`
