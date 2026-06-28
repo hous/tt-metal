@@ -163,6 +163,7 @@ def _record_kv_cache_pcc(
     kv_lora,
     assert_threshold=None,
     assert_layer_depth=None,
+    return_per_layer=False,
 ):
     """Gather the device KV cache, un-rotate the block-cyclic layout, and PCC each layer's valid
     region [:total_len] against the golden kv_post_transform trace. nope is compared directly; the
@@ -225,6 +226,8 @@ def _record_kv_cache_pcc(
             ), f"KV cache min PCC {gated_min:.6f} (layers 0..{assert_layer_depth}) < {assert_threshold}"
         else:
             assert overall >= assert_threshold, f"KV cache min PCC {overall:.6f} < {assert_threshold}"
+    if return_per_layer:
+        return overall, cache_min_pcc
     return overall
 
 
@@ -420,6 +423,193 @@ def run_chunked_transformer_padded(
     )
     for key in profiler.times:
         logger.info(f"  {key}: {profiler.get(key) * 1000:.2f} ms")
+
+
+def run_chunked_transformer_padded_trace(
+    variant,
+    config,
+    mesh_device,
+    weight_cache_path,
+    num_layers,
+    splits,
+    gate_fallback_mode,
+    num_links,
+    topology,
+    routing_use_l1_small_for_semaphores=False,
+):
+    """Trace+metadata twin of run_chunked_transformer_padded. On ONE kv_only build it runs the same
+    VARIABLE/partial-chunk prefill TWICE:
+      PASS A (untraced, scalar host actual_start/actual_end) -> KV cache A;
+      PASS B (a metadata ttnn trace captured once + replayed per split, per-chunk scalars read on-device
+              from a persistent metadata tensor) -> KV cache B.
+    It then asserts the per-layer KV-cache PCC (vs the golden kv_post_transform) of the TRACED metadata
+    path == the UNTRACED scalar path (bit-exact), and that the traced path meets the PCC threshold. This
+    is the trace-safe equivalent of the untraced run_chunked_transformer_padded for the metadata path."""
+    if weight_cache_path is None:
+        pytest.skip(f"pretrained weights unavailable (set {variant.ttnn_cache_env} + {variant.env_var})")
+    trace_dir = _resolve_trace_dir(variant)
+    if not trace_dir.exists():
+        pytest.skip(f"golden trace not found: {trace_dir}")
+    layout = variant.prefill_trace_layout
+
+    sp_axis, tp_axis = 0, 1
+    mesh_shape = list(mesh_device.shape)
+    sp, tp = mesh_shape[sp_axis], mesh_shape[tp_axis]
+    assert (sp, tp) == (8, 4), f"this test targets mesh-8x4, got {mesh_shape}"
+    tile = ttnn.TILE_SIZE
+    chunk_local = CHUNK // sp
+    total_len = sum(splits)
+    for v in splits:
+        assert 0 < v <= CHUNK and v % tile == 0, f"split {v} must be tile-aligned and <= {CHUNK}"
+
+    # Slab-aligned cache covering the largest rotated write (mirror run_chunked_transformer_padded).
+    max_window, ka = CHUNK * 2, 0
+    for v in splits:
+        max_window = max(max_window, ka + CHUNK)
+        ka += v
+    seq_len_cache = ((max_window + CHUNK - 1) // CHUNK) * CHUNK
+
+    kvpe_dim = config.qk_rope_head_dim + config.kv_lora_rank
+    config.max_seq_len = seq_len_cache
+    logger.info(
+        f"chunked-padded TRACE: num_layers={num_layers} mesh={mesh_shape} splits={splits} "
+        f"total_len={total_len} cache={seq_len_cache} chunk={CHUNK}"
+    )
+    token_ids_full = _load_metadata_token_ids(trace_dir, total_len)
+
+    effective_cache_path = weight_cache_path / f"{sp}x{tp}"
+    experts_per_chip = variant.model_config.NUM_ROUTED_EXPERTS // (sp * tp)
+    assert TtPrefillTransformer.check_cache_complete(
+        effective_cache_path, num_layers, experts_per_chip=experts_per_chip,
+        first_k_dense=variant.model_config.NUM_DENSE_LAYERS,
+    ), f"TTNN cache incomplete for {num_layers} layers at {effective_cache_path}"
+
+    transformer = TtPrefillTransformer(
+        mesh_device=mesh_device, config=config, model_cfg=variant.model_config, state_dict={},
+        num_layers=num_layers, seq_len=CHUNK, max_seq_len=seq_len_cache, dispatch_buffer_capacity_factor=8,
+        num_links=num_links, topology=topology, sp_axis=sp_axis, tp_axis=tp_axis, is_balanced=False,
+        gate_fallback_mode=gate_fallback_mode, weight_cache_path=effective_cache_path,
+        lm_head_is_column_parallel=True, is_chunked=True, slot_num=1,
+        # kv_only_last_layer -> device-only forward (no host readback) so ttnn trace can capture it.
+        kv_only_last_layer=True, overlap_shared_expert_with_dispatch=True,
+        routing_use_l1_small_for_semaphores=routing_use_l1_small_for_semaphores,
+    )
+    ttnn.synchronize_device(mesh_device)
+    gc.collect()
+    mesh_device.enable_program_cache()
+
+    # Per-split padded token tile (block-cyclic gather; positions >= valid_end -> pad token 0) + scalars.
+    def _padded_chunk_tok(kv_actual, isl):
+        valid_end = kv_actual + isl
+        positions = rotated_chip_positions(kv_actual, sp, chunk_local)
+        flat = [positions[ch][r] for ch in range(sp) for r in range(chunk_local)]
+        gather_idx = torch.tensor([min(gp, total_len - 1) for gp in flat], dtype=torch.long)
+        tok = token_ids_full[gather_idx].clone()
+        tok[torch.tensor([gp >= valid_end for gp in flat])] = 0
+        return tok.reshape(sp, 1, chunk_local)
+
+    starts, ka = [], 0
+    for isl in splits:
+        starts.append((ka, ka + isl))  # (kv_actual, valid_end)
+        ka += isl
+    chunk_tok_host = [_padded_chunk_tok(ks, e - ks) for (ks, e) in starts]
+
+    def _make_cache():
+        return init_kvpe_cache(
+            kvpe_cache_head_dim=kvpe_dim, mesh_device=mesh_device, seq_len=seq_len_cache,
+            mesh_shape=mesh_shape, sp_axis=sp_axis, num_kvpe_cache_layers=num_layers, num_users=1,
+        )
+
+    sp_mapper = ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_shape), dims=(0, None))
+    rep_mapper = ttnn.ReplicateTensorToMesh(mesh_device)
+
+    # ---- PASS A: untraced scalar (host actual_start/actual_end), the reference path ----
+    cache_A = _make_cache()
+    for (ks, e), tok in zip(starts, chunk_tok_host):
+        tt_tokens = ttnn.from_torch(
+            tok, device=mesh_device, dtype=ttnn.uint32, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=sp_mapper,
+        )
+        transformer.forward(
+            tt_tokens, cache_A, number_of_non_padded_tokens=e - ks,
+            actual_start=ks, actual_end=e, cache_user_id=0, metadata=None,
+        )
+        ttnn.deallocate(tt_tokens)
+    ttnn.synchronize_device(mesh_device)
+    logger.info("[padded-trace] PASS A (untraced scalar) done; recording per-layer KV PCC vs golden")
+    _, pcc_A = _record_kv_cache_pcc(
+        trace_dir, layout, cache_A, mesh_device, sp, num_layers, seq_len_cache, total_len,
+        kvpe_dim, config.kv_lora_rank, return_per_layer=True,
+    )
+    ttnn.deallocate(cache_A)
+
+    # ---- PASS B: metadata trace captured ONCE, replayed per split ----
+    cache_B = _make_cache()  # persistent (captured) cache
+    trace_input = ttnn.from_torch(
+        chunk_tok_host[0], device=mesh_device, dtype=ttnn.uint32, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=sp_mapper,
+    )
+    trace_metadata = ttnn.from_torch(
+        torch.tensor([0, starts[0][0], starts[0][1], 0], dtype=torch.int64).reshape(1, 1, 1, 4),
+        device=mesh_device, dtype=ttnn.uint32, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=rep_mapper,
+    )
+    tok_host_tt = [ttnn.from_torch(t, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=sp_mapper) for t in chunk_tok_host]
+    meta_host_tt = [
+        ttnn.from_torch(
+            torch.tensor([0, ks, e, 0], dtype=torch.int64).reshape(1, 1, 1, 4),
+            dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=rep_mapper,
+        )
+        for (ks, e) in starts
+    ]
+
+    def _fwd_meta():
+        transformer.forward(
+            trace_input, cache_B, number_of_non_padded_tokens=CHUNK,
+            actual_start=None, actual_end=None, cache_user_id=0, metadata=trace_metadata,
+        )
+
+    controller = SubDeviceTraceController(mesh_device)
+    transformer.set_trace_controller(controller)
+    _fwd_meta()  # warmup (compile metadata program variants)
+    ttnn.synchronize_device(mesh_device)
+    logger.info(f"[padded-trace] capturing {num_layers}-layer metadata forward...")
+    controller.begin_capture()
+    _fwd_meta()
+    controller.end_capture()
+    ttnn.synchronize_device(mesh_device)
+    logger.info(f"[padded-trace] {controller.num_segments} segments, {controller.trace_bytes()/1024/1024:.2f} MB")
+
+    for c, (ks, e) in enumerate(starts):
+        ttnn.copy_host_to_device_tensor(tok_host_tt[c], trace_input)
+        ttnn.copy_host_to_device_tensor(meta_host_tt[c], trace_metadata)
+        controller.replay()
+    ttnn.synchronize_device(mesh_device)
+    controller.release()
+    transformer.set_trace_controller(None)
+    ttnn.deallocate(trace_input)
+    ttnn.deallocate(trace_metadata)
+    logger.info("[padded-trace] PASS B (metadata trace) done; recording per-layer KV PCC vs golden")
+    _, pcc_B = _record_kv_cache_pcc(
+        trace_dir, layout, cache_B, mesh_device, sp, num_layers, seq_len_cache, total_len,
+        kvpe_dim, config.kv_lora_rank, assert_threshold=LAYER_PCC_THRESHOLD,
+        assert_layer_depth=(GATED_LAYER_DEPTH if num_layers > GATED_LAYER_DEPTH else None),
+        return_per_layer=True,
+    )
+    transformer.release_sub_device_managers()
+
+    # ---- VERIFY: traced metadata path == untraced scalar path (per-layer, bit-exact KV) ----
+    logger.info("[padded-trace] per-layer KV PCC: untraced(scalar) vs traced(metadata):")
+    max_diff = 0.0
+    for i in range(num_layers):
+        a, b = pcc_A[i], pcc_B[i]
+        max_diff = max(max_diff, abs(a - b))
+        logger.info(f"  layer {i}: untraced={a:.6f}  traced={b:.6f}  |diff|={abs(a-b):.2e}")
+    logger.success(f"[padded-trace] max |untraced - traced| per-layer KV PCC = {max_diff:.2e}")
+    assert max_diff < 1e-3, (
+        f"metadata+trace KV PCC differs from untraced scalar by {max_diff:.2e} (>1e-3) — "
+        f"the traced path should be bit-identical to the untraced path"
+    )
 
 
 def run_chunked_transformer(
@@ -1173,6 +1363,58 @@ def test_ds_prefill_transformer_chunked_padded(
     topology,
 ):
     run_chunked_transformer_padded(
+        variant,
+        config_only,
+        mesh_device,
+        weight_cache_path,
+        num_layers,
+        splits,
+        GateComputeMode.DEVICE,
+        num_links,
+        topology,
+    )
+
+
+# Trace+metadata twin of test_ds_prefill_transformer_chunked_padded: the variable/partial-chunk prefill
+# run via a captured metadata ttnn trace replayed per split, asserting its per-layer KV-cache PCC matches
+# the untraced scalar path bit-exactly (and meets the PCC threshold). Needs trace_region_size > 0.
+@pytest.mark.parametrize("splits", [_PADDED_FULL_55K], ids=["full55k"])
+@pytest.mark.parametrize("num_layers", [1, 10, 61], ids=["L1", "L10", "L61"])
+@pytest.mark.parametrize(
+    "mesh_device, device_params, num_links, topology",
+    [
+        pytest.param(
+            (8, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(
+                    max_payload_size=DeepSeekV3Config.FABRIC_PAYLOAD_SIZE
+                ),
+                "trace_region_size": 256 * 1024 * 1024,
+            },
+            2,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
+            id="mesh-8x4",
+        ),
+    ],
+    indirect=["mesh_device", "device_params"],
+)
+@pytest.mark.parametrize("variant", ["deepseek_v3_d_p"], indirect=True, ids=["deepseek_v3"])
+@pytest.mark.skipif(not is_blackhole(), reason="DeepSeek prefill requires Blackhole")
+@pytest.mark.timeout(0)
+def test_ds_prefill_transformer_chunked_padded_trace(
+    variant,
+    config_only,
+    mesh_device,
+    device_params,
+    weight_cache_path,
+    num_layers,
+    splits,
+    num_links,
+    topology,
+):
+    run_chunked_transformer_padded_trace(
         variant,
         config_only,
         mesh_device,
