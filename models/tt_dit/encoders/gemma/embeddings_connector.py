@@ -309,24 +309,15 @@ class EmbeddingsConnector(Module):
             for _ in range(num_blocks)
         )
 
-    def forward(self, features: ttnn.Tensor, attn_mask: torch.Tensor, *, trans_mat: ttnn.Tensor) -> torch.Tensor:
-        """Register replacement → on-device RoPE transformer blocks → final norm, on the
-        aggregate_embed ``features`` from GemmaFeatureExtractor. ``trans_mat`` is built once by
-        the caller (the rotation matrix is a shared constant). Returns the host conditioning."""
+        # RoPE cos/sin depend only on seq_len (dim/heads/theta are fixed), so build once per length
+        # and reuse — the grids were being recomputed on host and re-uploaded on every encode.
+        self._rope_cache: dict[int, tuple[ttnn.Tensor, ttnn.Tensor]] = {}
+
+    def _rope_cos_sin(self, seq_len: int) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        cached = self._rope_cache.get(seq_len)
+        if cached is not None:
+            return cached
         dim = self.output_dim
-        projected = ttnn.to_torch(ttnn.get_device_tensors(features)[0])
-        ttnn.deallocate(features)
-
-        # Replace padded tokens with learnable registers (on host, matching the reference).
-        if self.num_learnable_registers > 0:
-            registers = ttnn.to_torch(ttnn.get_device_tensors(self.learnable_registers.data)[0])
-            projected = _replace_padded_with_registers(projected, attn_mask, registers, self.num_learnable_registers)
-
-        # Connector RoPE on device. Checkpoint is rope_type=SPLIT, but the block's Q/K (and
-        # q_norm/k_norm) weights were permuted at load (SPLIT→INTERLEAVED), so the on-device
-        # rotary_embedding_llama interleaved kernel is equivalent. cos/sin use the same fp32 freq
-        # grid as the reference.
-        seq_len = projected.shape[1]
         num_heads = self.transformer_1d_blocks[0].num_heads
         indices_grid = torch.arange(seq_len, dtype=torch.float32).reshape(1, seq_len, 1)
         cos_freq, sin_freq = precompute_freqs_cis(
@@ -346,6 +337,26 @@ class EmbeddingsConnector(Module):
         shard_kw = {"mesh_axis": conn_tp.mesh_axis, "shard_dim": 1} if conn_tp.factor > 1 else {}
         rope_cos = bf16_tensor(cos_freq, device=self.mesh_device, **shard_kw)
         rope_sin = bf16_tensor(sin_freq, device=self.mesh_device, **shard_kw)
+        self._rope_cache[seq_len] = (rope_cos, rope_sin)
+        return rope_cos, rope_sin
+
+    def forward(self, features: ttnn.Tensor, attn_mask: torch.Tensor, *, trans_mat: ttnn.Tensor) -> torch.Tensor:
+        """Register replacement → on-device RoPE transformer blocks → final norm, on the
+        aggregate_embed ``features`` from GemmaFeatureExtractor. ``trans_mat`` is built once by
+        the caller (the rotation matrix is a shared constant). Returns the host conditioning."""
+        projected = ttnn.to_torch(ttnn.get_device_tensors(features)[0])
+        ttnn.deallocate(features)
+
+        # Replace padded tokens with learnable registers (on host, matching the reference).
+        if self.num_learnable_registers > 0:
+            registers = ttnn.to_torch(ttnn.get_device_tensors(self.learnable_registers.data)[0])
+            projected = _replace_padded_with_registers(projected, attn_mask, registers, self.num_learnable_registers)
+
+        # Connector RoPE on device (cached per seq_len). Checkpoint is rope_type=SPLIT, but the
+        # block's Q/K (and q_norm/k_norm) weights were permuted at load (SPLIT→INTERLEAVED), so the
+        # on-device rotary_embedding_llama interleaved kernel is equivalent.
+        seq_len = projected.shape[1]
+        rope_cos, rope_sin = self._rope_cos_sin(seq_len)
 
         tt_x = ttnn.from_torch(
             projected.bfloat16(), device=self.mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16

@@ -79,6 +79,13 @@ class LTXDistilledPipeline(LTXPipeline):
             self._prealloc_trace_io("s1", num_frames=num_frames, height=height // 2, width=width // 2)
             self._prealloc_trace_io("s2", num_frames=num_frames, height=height, width=width)
 
+        # Same allocate-before-capture rule as the trace I/O above: hold the encoder + connector
+        # buffers before any capture so a trace's activation region can't reuse and zero them on
+        # replay. dynamic_load reloads the encoder per request, so that path warms it last instead.
+        if self._traced and not self.dynamic_load:
+            self.gemma_encoder_pair.ensure_loaded()
+            self.encode_prompts(["warmup"], use_cache=False)
+
         # Sigma schedules from the real distilled paths so warmup exercises the
         # same math branches generate() does (incl. the sigma_next == 0 final step).
         s1_sigmas = list(DISTILLED_SIGMA_VALUES)[:num_inference_steps] + [0.0]
@@ -152,8 +159,10 @@ class LTXDistilledPipeline(LTXPipeline):
             self._warmup_encode(height, width)
 
         # use_cache=False forces a real encode so the Gemma/connector kernels actually compile.
-        self.gemma_encoder_pair.ensure_loaded()
-        self.encode_prompts(["warmup"], use_cache=False)
+        # The traced not-dynamic_load path already did this before capture (see above).
+        if self.dynamic_load or not self._traced:
+            self.gemma_encoder_pair.ensure_loaded()
+            self.encode_prompts(["warmup"], use_cache=False)
 
         logger.info(f"warmup (distilled 2-stage) done in {time.time() - t0:.1f}s")
 
