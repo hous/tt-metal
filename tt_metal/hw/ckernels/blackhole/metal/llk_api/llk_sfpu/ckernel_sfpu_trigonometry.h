@@ -486,7 +486,7 @@ sfpi_inline sfpi::vFloat _sfpu_quarter_exp_abs_(sfpi::vFloat x) {
         i += 125;
         r = r * f + sfpi::vConstFloatPrgm2;
         // #48400, compiler should spot this for us
-        c1 = sfpi::as<sfpi::vFloat>(sfpi::as<sfpi::vInt>(sfpi::vFloat(1.0f)) - 613);  // 0x3f7ffd9b = 0.999963462f
+        c1 = sfpi::as<sfpi::vFloat>(sfpi::as<sfpi::vInt>(sfpi::vConst1) - 613);  // 0x3f7ffd9b = 0.999963462f
         r = r * f + c1;
 
     } else {
