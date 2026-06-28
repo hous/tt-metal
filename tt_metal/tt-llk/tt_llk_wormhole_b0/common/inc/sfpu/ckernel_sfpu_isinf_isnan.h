@@ -23,10 +23,10 @@ inline sfpi::vFloat _calculate_isinf_(const sfpi::vFloat& in)
     // SFPU microcode
     sfpi::vInt exp   = sfpi::exexp(in);
     sfpi::vInt man   = sfpi::exman(in);
-    sfpi::vFloat out = sfpi::vConst0;
+    sfpi::vFloat out = 0.0f;
     v_if (exp == 128 && man == 0)
     {
-        out = sfpi::vConst1;
+        out = 1.0f;
     }
     v_endif;
     return out;
@@ -45,11 +45,11 @@ inline sfpi::vFloat _calculate_isposinf_(const sfpi::vFloat& in)
     // SFPU microcode
     sfpi::vInt exp     = sfpi::exexp(in);
     sfpi::vInt man     = sfpi::exman(in);
-    sfpi::vFloat out   = sfpi::vConst0;
+    sfpi::vFloat out   = 0.0f;
     sfpi::vInt signbit = sfpi::as<sfpi::vInt>(in) & 0x80000000; // returns 0 for +ve value
     v_if (signbit == 0 && exp == 128 && man == 0)
     {
-        out = sfpi::vConst1;
+        out = 1.0f;
     }
     v_endif;
     return out;
@@ -68,11 +68,11 @@ inline sfpi::vFloat _calculate_isneginf_(const sfpi::vFloat& in)
     // SFPU microcode
     sfpi::vInt exp     = sfpi::exexp(in);
     sfpi::vInt man     = sfpi::exman(in);
-    sfpi::vFloat out   = sfpi::vConst0;
+    sfpi::vFloat out   = 0.0f;
     sfpi::vInt signbit = sfpi::as<sfpi::vInt>(in) & 0x80000000; // returns 0x80000000 for -ve value
     v_if (signbit == 0x80000000 && exp == 128 && man == 0)
     {
-        out = sfpi::vConst1;
+        out = 1.0f;
     }
     v_endif;
     return out;
@@ -90,10 +90,10 @@ inline sfpi::vFloat _calculate_isnan_(const sfpi::vFloat& in)
     // SFPU microcode
     sfpi::vInt exp   = sfpi::exexp(in);
     sfpi::vInt man   = sfpi::exman(in);
-    sfpi::vFloat out = sfpi::vConst0;
+    sfpi::vFloat out = 0.0f;
     v_if (exp == 128 && man != 0)
     {
-        out = sfpi::vConst1;
+        out = 1.0f;
     }
     v_endif;
     return out;
@@ -105,12 +105,12 @@ inline sfpi::vFloat _calculate_isfinite_(const sfpi::vFloat& v)
     // SFPU microcode
     // A number is finite if it's neither infinity nor NaN
     sfpi::vInt exp      = sfpi::exexp(v);
-    sfpi::vFloat result = sfpi::vConst1; // Assume finite (1.0f) by default
+    sfpi::vFloat result = 1.0f; // Assume finite (1.0f) by default
 
     // If exponent is 128, the number is either infinity or NaN (not finite)
     v_if (exp == 128)
     {
-        result = sfpi::vConst0;
+        result = 0.0f;
     }
     v_endif;
 
