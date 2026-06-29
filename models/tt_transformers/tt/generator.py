@@ -521,6 +521,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         )
 
         ttnn.execute_trace(self.model_args[model_id].mesh_device, trace_id, cq_id=0, blocking=False)
+        # [prefill-sync experiment] device synchronization between prefill traces.
+        ttnn.synchronize_device(self.model_args[model_id].mesh_device)
 
         return tt_out_trace
 
