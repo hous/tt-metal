@@ -63,10 +63,12 @@
 #include "tt_metal/fabric/fabric_init.hpp"
 #include <tt-metalium/experimental/fabric/control_plane.hpp>
 #include <umd/device/coordinates/coordinate_manager.hpp>
+#include <umd/device/tt_device/tt_device.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 #include <umd/device/types/xy_pair.hpp>
 #include <impl/debug/watcher_server.hpp>
 #include <impl/dispatch/dispatch_mem_map.hpp>
+#include <impl/dispatch/dispatch_telemetry.hpp>
 
 namespace tt::tt_metal {
 
@@ -91,6 +93,94 @@ Device::Device(
     TT_FATAL(env != nullptr, "env is nullptr");
     TT_FATAL(context != nullptr, "context is nullptr");
     this->initialize(num_hw_cqs, l1_small_size, trace_region_size, worker_l1_size, l1_bank_remap, minimal);
+}
+
+void Device::initialize_smc_dispatch_telemetry_control() {
+    if (this->arch() != tt::ARCH::BLACKHOLE) {
+        return;
+    }
+
+    smc_dispatch_telemetry_control_ = SMCDispatchTelemetryControl{};
+    smc_dispatch_telemetry_control_.num_hw_cqs = this->num_hw_cqs_;
+    auto* tt_device = context_->get_cluster().get_driver()->get_tt_device(this->id_);
+    if (tt_device == nullptr) {
+        return;
+    }
+    write_smc_dispatch_telemetry_control(*tt_device, smc_dispatch_telemetry_control_);
+}
+
+void Device::invalidate_smc_dispatch_telemetry_control() {
+    if (this->arch() != tt::ARCH::BLACKHOLE) {
+        return;
+    }
+
+    auto* tt_device = context_->get_cluster().get_driver()->get_tt_device(this->id_);
+    if (tt_device == nullptr) {
+        return;
+    }
+    tt::tt_metal::invalidate_smc_dispatch_telemetry_control(*tt_device);
+}
+
+bool Device::sync_smc_dispatch_telemetry_control_with_device() {
+    if (this->arch() != tt::ARCH::BLACKHOLE) {
+        return false;
+    }
+
+    auto* tt_device = context_->get_cluster().get_driver()->get_tt_device(this->id_);
+    if (tt_device == nullptr) {
+        return false;
+    }
+
+    const auto device_control = read_smc_dispatch_telemetry_control(*tt_device);
+    if (device_control.has_value() &&
+        std::memcmp(&*device_control, &smc_dispatch_telemetry_control_, sizeof(smc_dispatch_telemetry_control_)) == 0) {
+        return true;
+    }
+
+    log_warning(
+        tt::LogMetal,
+        "SMC dispatch telemetry control mismatch on device {}; restoring host-side control block",
+        this->id_);
+    return write_smc_dispatch_telemetry_control(*tt_device, smc_dispatch_telemetry_control_);
+}
+
+void Device::update_smc_dispatch_telemetry_for_fast_dispatch(uint8_t cq_id, const SMCDispatchCoreCoords& coords) {
+    if (this->arch() != tt::ARCH::BLACKHOLE) {
+        return;
+    }
+
+    TT_FATAL(cq_id < RESERVED_CQ_SPACE, "CQ id {} exceeds reserved SMC dispatch telemetry CQ space", cq_id);
+    auto* tt_device = context_->get_cluster().get_driver()->get_tt_device(this->id_);
+    if (tt_device == nullptr) {
+        return;
+    }
+
+    this->sync_smc_dispatch_telemetry_control_with_device();
+
+    smc_dispatch_telemetry_control_.cq_dispatch_core_coords[cq_id] = coords;
+    smc_dispatch_telemetry_control_.num_hw_cqs = this->num_hw_cqs_;
+    write_smc_dispatch_telemetry_control(*tt_device, smc_dispatch_telemetry_control_);
+}
+
+void Device::set_smc_dispatch_telemetry_slow_dispatch_enabled(bool enabled) {
+    if (this->arch() != tt::ARCH::BLACKHOLE) {
+        return;
+    }
+
+    auto* tt_device = context_->get_cluster().get_driver()->get_tt_device(this->id_);
+    if (tt_device == nullptr) {
+        return;
+    }
+
+    this->sync_smc_dispatch_telemetry_control_with_device();
+    if (enabled) {
+        smc_dispatch_telemetry_control_.flags |=
+            static_cast<uint32_t>(SMCDispatchTelemetryFlags::SLOW_DISPATCH_ENABLED);
+    } else {
+        smc_dispatch_telemetry_control_.flags &=
+            ~static_cast<uint32_t>(SMCDispatchTelemetryFlags::SLOW_DISPATCH_ENABLED);
+    }
+    write_smc_dispatch_telemetry_control(*tt_device, smc_dispatch_telemetry_control_);
 }
 
 std::unordered_set<CoreCoord> Device::get_active_ethernet_cores(bool skip_reserved_tunnel_cores) const {
@@ -551,6 +641,7 @@ bool Device::initialize(
     }
 
     this->initialized_ = true;
+    this->initialize_smc_dispatch_telemetry_control();
 
     return true;
 }
@@ -560,6 +651,8 @@ bool Device::close() {
     if (not this->initialized_) {
         TT_THROW("Cannot close device {} that has not been initialized!", this->id_);
     }
+
+    this->invalidate_smc_dispatch_telemetry_control();
 
     tt::tt_metal::MetalContext::instance().get_service_core_manager().impl().on_device_close(this->id_);
 

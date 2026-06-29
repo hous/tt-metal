@@ -7,6 +7,7 @@
 #include <optional>
 #include <limits>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
@@ -65,7 +66,7 @@ std::optional<RtTelemetryLoc> discover_runtime_telemetry(tt::umd::TTDevice& tt_d
     return loc;
 }
 
-std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device) {
+std::optional<RtTelemetryLoc> discover_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device) {
     auto loc = discover_runtime_telemetry(tt_device);
     if (!loc.has_value()) {
         return std::nullopt;
@@ -82,9 +83,17 @@ std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control(t
             sizeof(SMCDispatchTelemetryControl));
         return std::nullopt;
     }
+    return loc;
+}
+
+std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control_impl(tt::umd::TTDevice& tt_device) {
+    auto loc = discover_smc_dispatch_telemetry_control(tt_device);
+    if (!loc.has_value()) {
+        return std::nullopt;
+    }
 
     SMCDispatchTelemetryControl control{};
-    tt::umd::NocIdSwitcher noc0(tt::umd::NocId::NOC0);
+    tt::umd::NocIdSwitcher noc0_guard(tt::umd::NocId::NOC0);
     tt_device.read_from_device(&control, loc->arc_core, loc->addr, sizeof(control));
 
     if (control.signature != SMC_TELEMETRY_SIGNATURE) {
@@ -123,7 +132,7 @@ std::optional<T> read_telemetry_impl(
     uint32_t addr = dispatch_mem_map.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_TELEMETRY);
 
     T telemetry{};
-    tt::umd::NocIdSwitcher noc0(tt::umd::NocId::NOC0);
+    tt::umd::NocIdSwitcher noc0_guard(tt::umd::NocId::NOC0);
     tt_device.read_from_device(&telemetry, noc0_core, addr, sizeof(telemetry));
 
     if (telemetry.signature != signature) {
@@ -175,6 +184,37 @@ std::optional<PrefetchCoreTelemetry> read_prefetch_core_telemetry(tt::umd::TTDev
         tt_device, noc0_core, PREFETCH_CORE_TELEMETRY_SIGNATURE, DISPATCH_TELEMETRY_VERSION);
 }
 
+std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device) {
+    return read_smc_dispatch_telemetry_control_impl(tt_device);
+}
+
+bool write_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device, const SMCDispatchTelemetryControl& control) {
+    auto loc = discover_smc_dispatch_telemetry_control(tt_device);
+    if (!loc.has_value()) {
+        return false;
+    }
+
+    tt::umd::NocIdSwitcher noc0_guard(tt::umd::NocId::NOC0);
+    tt_device.write_to_device(&control, loc->arc_core, loc->addr, sizeof(control));
+    return true;
+}
+
+bool invalidate_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device) {
+    auto loc = discover_smc_dispatch_telemetry_control(tt_device);
+    if (!loc.has_value()) {
+        return false;
+    }
+
+    uint32_t invalid_signature = INVALID_TELEMETRY_SIGNATURE;
+    tt::umd::NocIdSwitcher noc0_guard(tt::umd::NocId::NOC0);
+    tt_device.write_to_device(
+        &invalid_signature,
+        loc->arc_core,
+        loc->addr + offsetof(SMCDispatchTelemetryControl, signature),
+        sizeof(invalid_signature));
+    return true;
+}
+
 class DispatchTelemetry::Impl {
 private:
     enum class CoreRole : uint8_t {
@@ -219,12 +259,12 @@ private:
 
     std::optional<CoreCollection> collect_telemetry_cores() {
         auto control = read_smc_dispatch_telemetry_control(tt_device_);
-        if (!control.has_value()) {
+        if (!control.has_value() || control->num_hw_cqs > RESERVED_CQ_SPACE) {
             return std::nullopt;
         }
 
         CoreCollection collection;
-        const uint32_t num_cqs = std::min(control->num_hw_cqs, static_cast<uint32_t>(RESERVED_FD_CQ_SPACE));
+        const uint32_t num_cqs = control->num_hw_cqs;
 
         for (uint8_t cq = 0; cq < num_cqs; ++cq) {
             const auto& core_coords = control->cq_dispatch_core_coords[cq];

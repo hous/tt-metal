@@ -36,4 +36,29 @@ std::optional<DispatchCoreTelemetry> read_dispatch_core_telemetry(tt::umd::TTDev
  */
 std::optional<PrefetchCoreTelemetry> read_prefetch_core_telemetry(tt::umd::TTDevice& tt_device, tt_xy_pair noc0_core);
 
+/**
+ * @brief Read the SMC dispatch telemetry control block.
+ *
+ * @param tt_device Non-owning UMD device context.
+ * @return Control block on success, or std::nullopt if discovery or validation fails.
+ */
+std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device);
+
+/**
+ * @brief Write the SMC dispatch telemetry control block.
+ *
+ * @param tt_device Non-owning UMD device context.
+ * @param control Host-side control block to write.
+ * @return True if the write completed, false if the SMC buffer is unavailable.
+ */
+bool write_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device, const SMCDispatchTelemetryControl& control);
+
+/**
+ * @brief Invalidate the SMC dispatch telemetry control block signature.
+ *
+ * @param tt_device Non-owning UMD device context.
+ * @return True if the invalidation completed, false if the SMC buffer is unavailable.
+ */
+bool invalidate_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device);
+
 }  // namespace tt::tt_metal

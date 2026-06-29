@@ -960,7 +960,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryDoesNotOvercountComple
     Finish(cq);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    auto after_second_batch = read_dispatch_core_telemetry(device()->id(), dispatch_s_core);
+    auto after_second_batch = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(dispatch_s_core));
     ASSERT_TRUE(after_second_batch.has_value()) << "Telemetry was not readable after the second batch of work";
     ASSERT_TRUE(completion_counts_are_bounded(*after_second_batch))
         << "Telemetry completion count exceeded worker semaphore count after the second batch of work";

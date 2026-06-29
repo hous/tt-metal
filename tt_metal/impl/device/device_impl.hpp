@@ -10,6 +10,7 @@
 
 #include <tt-metalium/device.hpp>
 #include <hostdevcommon/common_values.hpp>
+#include <hostdevcommon/dispatch_telemetry_types.hpp>
 #include <hostdevcommon/kernel_structs.h>  // Leaked up to ttnn level from here
 #include <tt-metalium/hal_types.hpp>
 #include "context/metal_context.hpp"
@@ -150,6 +151,10 @@ public:
 
     bool compile_fabric();
     void configure_fabric();
+    void initialize_smc_dispatch_telemetry_control();
+    void invalidate_smc_dispatch_telemetry_control();
+    void update_smc_dispatch_telemetry_for_fast_dispatch(uint8_t cq_id, const SMCDispatchCoreCoords& coords);
+    void set_smc_dispatch_telemetry_slow_dispatch_enabled(bool enabled);
     // Puts device into reset
     bool close() override;
 
@@ -219,6 +224,8 @@ private:
 
     void configure_command_queue_programs(DispatchTopology* topology);
 
+    bool sync_smc_dispatch_telemetry_control_with_device();
+
     // NOLINTNEXTLINE(readability-make-member-function-const)
     void mark_allocations_unsafe();
     // NOLINTNEXTLINE(readability-make-member-function-const)
@@ -235,6 +242,7 @@ private:
     std::vector<std::vector<ChipId>> tunnels_from_mmio_;
 
     bool initialized_ = false;
+    SMCDispatchTelemetryControl smc_dispatch_telemetry_control_;
 
     std::vector<std::unique_ptr<Program>> command_queue_programs_;
     bool using_fast_dispatch_ = false;

@@ -48,8 +48,11 @@
 #include "tt_metal/impl/trace/dispatch.hpp"
 #include "tt_metal/impl/program/program_command_sequence.hpp"
 #include "tt_metal/impl/allocator/allocator.hpp"
+#include "tt_metal/impl/device/device_impl.hpp"
 #include "tt_metal/tools/profiler/tt_metal_tracy.hpp"
 #include "tt_metal/impl/device/dispatch.hpp"
+#include "llrt/tt_cluster.hpp"
+#include <umd/device/tt_device/tt_device.hpp>
 #include <umd/device/types/xy_pair.hpp>
 #include <tt-metalium/graph_tracking.hpp>
 #include <tt_stl/overloaded.hpp>
@@ -108,6 +111,39 @@ void record_program_sub_device_for_range(
     TT_THROW("No local device found for range");
 }
 
+SMCDispatchCoreCoords build_smc_dispatch_core_coords(Device& device, uint8_t cq_id) {
+    auto& context = MetalContext::instance(device.get_context_id());
+    auto* tt_device = context.get_cluster().get_driver()->get_tt_device(device.id());
+    if (tt_device == nullptr) {
+        return {};
+    }
+
+    auto pack_logical_dispatch_core = [&](const tt_cxy_pair& logical_cxy) {
+        const CoreType core_type = context.get_dispatch_core_manager().get_dispatch_core_type();
+        const CoreCoord virtual_core =
+            device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
+        const auto noc0_core = tt_device->get_soc_descriptor().translate_coord_to(
+            virtual_core, tt::CoordSystem::TRANSLATED, tt::CoordSystem::NOC0);
+        return set_smc_dispatch_core_xy(static_cast<uint16_t>(noc0_core.x), static_cast<uint16_t>(noc0_core.y));
+    };
+
+    auto& dcm = context.get_dispatch_core_manager();
+    const uint16_t channel = context.get_cluster().get_assigned_channel_for_device(device.id());
+
+    SMCDispatchCoreCoords coords;
+    if (device.is_mmio_capable()) {
+        coords.prefetch_xy = pack_logical_dispatch_core(dcm.prefetcher_core(device.id(), channel, cq_id));
+        coords.dispatch_xy = pack_logical_dispatch_core(dcm.dispatcher_core(device.id(), channel, cq_id));
+    } else {
+        coords.prefetch_xy = pack_logical_dispatch_core(dcm.prefetcher_d_core(device.id(), channel, cq_id));
+        coords.dispatch_xy = pack_logical_dispatch_core(dcm.dispatcher_d_core(device.id(), channel, cq_id));
+    }
+    coords.dispatch_s_xy = dcm.is_dispatcher_s_core_allocated(device.id(), channel, cq_id)
+                               ? pack_logical_dispatch_core(dcm.dispatcher_s_core(device.id(), channel, cq_id))
+                               : 0;
+    return coords;
+}
+
 }  // namespace
 
 struct MeshReadEventDescriptor {
@@ -163,6 +199,12 @@ FDMeshCommandQueue::FDMeshCommandQueue(
         DispatchSettings::DISPATCH_MESSAGE_ENTRIES,
         mesh_device_->allocator_impl()->get_config().l1_unreserved_base);
     this->populate_virtual_program_dispatch_core();
+    for (auto* device : mesh_device_->get_devices()) {
+        if (auto* physical_device = dynamic_cast<Device*>(device)) {
+            physical_device->update_smc_dispatch_telemetry_for_fast_dispatch(
+                this->id_, build_smc_dispatch_core_coords(*physical_device, this->id_));
+        }
+    }
     this->populate_read_descriptor_queue();
     completion_queue_reader_thread_ = std::thread(&FDMeshCommandQueue::read_completion_queue, this);
 }

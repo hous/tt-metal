@@ -85,6 +85,9 @@ void DispatchContext::initialize_fast_dispatch(distributed::MeshDevice* mesh_dev
     for (auto& cq : mesh_device_impl.mesh_command_queues_) {
         cq->finish();
     }
+    for (const auto& dev : active_devices) {
+        dev->set_smc_dispatch_telemetry_slow_dispatch_enabled(false);
+    }
     stashed_sd_queues_ = std::make_unique<StashedQueues>();
     for (auto& cq : mesh_device_impl.mesh_command_queues_) {
         stashed_sd_queues_->queues.push_back(std::move(cq));
@@ -133,6 +136,11 @@ void DispatchContext::terminate_fast_dispatch(distributed::MeshDevice* mesh_devi
         mesh_device_impl.mesh_command_queues_.push_back(std::move(cq));
     }
     stashed_sd_queues_.reset();
+    for (const auto& dev : active_devices) {
+        if (auto* physical_device = dynamic_cast<tt::tt_metal::Device*>(dev)) {
+            physical_device->set_smc_dispatch_telemetry_slow_dispatch_enabled(true);
+        }
+    }
 
     for (const auto& dev : active_devices) {
         for (int cq_id = 0; cq_id < dev->num_hw_cqs(); cq_id++) {

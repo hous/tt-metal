@@ -123,19 +123,22 @@ constexpr uint32_t get_smc_dispatch_core_y(uint32_t xy) { return xy & 0xFFFF; }
 constexpr uint32_t set_smc_dispatch_core_xy(uint16_t x, uint16_t y) { return (x << 16) | y; }
 
 constexpr uint32_t MAX_DISPATCH_CORES_PER_CQ = sizeof(SMCDispatchCoreCoords) / sizeof(uint32_t);
-constexpr uint32_t RESERVED_FD_CQ_SPACE = 3;
-static_assert(MAX_NUM_HW_CQS <= RESERVED_FD_CQ_SPACE, "Max number of hardware CQs exceeds reserved space");
+constexpr uint32_t RESERVED_CQ_SPACE = 3;
+static_assert(MAX_NUM_HW_CQS <= RESERVED_CQ_SPACE, "Max number of hardware CQs exceeds reserved space");
 
-// TODO: Probably needs to be uint32_t due to access and alignment requirements.
-//       Figure out if it needs accessible version/sig or not.
+// flags enum
+enum class SMCDispatchTelemetryFlags : uint32_t {
+    NONE = 0,
+    SLOW_DISPATCH_ENABLED = 1 << 0,
+};
 struct __attribute__((packed)) SMCDispatchTelemetryControl {
     uint32_t version = DISPATCH_TELEMETRY_VERSION;
     uint32_t signature = SMC_TELEMETRY_SIGNATURE;
     uint32_t flags = 0;
-    uint32_t num_hw_cqs = RESERVED_FD_CQ_SPACE;
-    SMCDispatchCoreCoords cq_dispatch_core_coords[RESERVED_FD_CQ_SPACE];
+    uint32_t num_hw_cqs = RESERVED_CQ_SPACE;
+    SMCDispatchCoreCoords cq_dispatch_core_coords[RESERVED_CQ_SPACE];
     struct __attribute__((packed)) SDTelemetry {
-    } sd_telemetry;
+    } sd_telemetry[RESERVED_CQ_SPACE];
 };
 
 }  // namespace tt::tt_metal
