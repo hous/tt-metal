@@ -589,7 +589,7 @@ class DeepSeekV4Attention(DeepSeekV4Module):
             scale=self.scaling,
             program_config=self._sdpa_pcfg,
             compute_kernel_config=_HIFI4_SDPA,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
         )  # [1, 1, H, Dh]
         return ttnn.transpose(attn, 1, 2)  # -> [1, H, 1, Dh]
 
