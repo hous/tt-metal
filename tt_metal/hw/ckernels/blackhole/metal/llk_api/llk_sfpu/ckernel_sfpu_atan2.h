@@ -21,9 +21,7 @@ sfpi_inline sfpi::vFloat _sfpu_atan2_(sfpi::vFloat y, sfpi::vFloat x) {
     sfpi::vFloat s;
 
     // Note: if x or y is ±NaN, this ensures that max=NaN, which is important for special case handling.
-    sfpi::vFloat min = sfpi::setsgn(x, 0);
-    sfpi::vFloat max = sfpi::setsgn(y, 0);
-    sfpi::vec_min_max(min, max);
+    auto [min, max] = sfpi::min_max(sfpi::abs(x), sfpi::abs(y));
 
     // a = min(|x|, |y|) / max(|x|, |y|), i.e. a is on [0, 1].
     sfpi::vFloat a = min * sfpu_reciprocal<is_bf16>(max);

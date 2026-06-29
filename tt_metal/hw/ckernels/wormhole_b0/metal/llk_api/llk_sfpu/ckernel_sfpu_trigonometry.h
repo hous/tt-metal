@@ -823,16 +823,18 @@ inline void calculate_acosh() {
     // SFPU microcode
     for (int d = 0; d < ITERATIONS; d++) {
         sfpi::vFloat inp = sfpi::dst_reg[0];
-        v_if(inp < sfpi::vConst1) { sfpi::dst_reg[0] = std::numeric_limits<float>::quiet_NaN(); }
-        v_elseif(inp == sfpi::vConst1) { sfpi::dst_reg[0] = sfpi::vConst0; }
+        sfpi::vFloat res;
+        v_if(inp < 1.0f) { res = std::numeric_limits<float>::quiet_NaN(); }
+        v_elseif(inp == 1.0f) { res = 0.0f; }
         v_else {
             sfpi::vFloat tmp = inp * inp;
-            tmp = tmp - sfpi::vConst1;
+            tmp = tmp - 1.0f;
             tmp = _calculate_sqrt_body_<APPROXIMATION_MODE>(tmp);
             tmp = tmp + inp;
-            sfpi::dst_reg[0] = _calculate_log_body_no_init_(tmp);
+            res = _calculate_log_body_no_init_(tmp);
         }
         v_endif;
+        sfpi::dst_reg[0] = res;
         sfpi::dst_reg++;
     }
 }
@@ -847,8 +849,7 @@ inline void calculate_asinh() {
         tmp = _calculate_sqrt_body_<APPROXIMATION_MODE>(tmp);
         tmp = tmp + sfpi::abs(inp);
         auto res = _calculate_log_body_no_init_(tmp);
-        v_if(inp < sfpi::vConst0) { res = -res; }
-        v_endif;
+        res = sfpi::abs(res);
         sfpi::dst_reg[0] = res;
         sfpi::dst_reg++;
     }

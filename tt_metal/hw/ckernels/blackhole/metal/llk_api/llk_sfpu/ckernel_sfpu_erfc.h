@@ -65,8 +65,7 @@ inline void calculate_erfc() {
         sfpi::vFloat x = sfpi::dst_reg[0];
         // Clamp |x| to 5.0 before evaluation (avoids extrapolation, saves one branch)
         sfpi::vFloat ax = sfpi::setsgn(x, 0);
-        sfpi::vFloat limit = 5.0f;
-        sfpi::vec_min_max(ax, limit);
+        ax = sfpi::min(ax, 5.0f);
         sfpi::vFloat r =
             piecewise_rational_eval<ERFC_NUM_DEGREE, ERFC_DEN_DEGREE, ERFC_NUM_SEGMENTS, ERFC_LUT_SIZE, false, true>(
                 ERFC_LUT, ax);
