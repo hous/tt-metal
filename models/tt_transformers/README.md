@@ -20,6 +20,7 @@ The current version is verified to work with the following models:
 | [Qwen 2.5 72B](https://huggingface.co/Qwen/Qwen2.5-72B)                                          | LoudBox / QuietBox          | ```Qwen/Qwen2.5-72B```                          |
 | [Qwen 3 32B](https://huggingface.co/Qwen/Qwen3-32B)                                              | LoudBox / QuietBox          | ```Qwen/Qwen3-32B```                            |
 | [Phi-3-mini-128k-instruct](https://huggingface.co/microsoft/Phi-3-mini-128k-instruct)            | n150 / n300                 | ```microsoft/Phi-3-mini-128k-instruct```        |
+| [SmolLM2 1.7B Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct)              | n150 / p100 / p150          | ```HuggingFaceTB/SmolLM2-1.7B-Instruct```       |
 
 <details>
 <summary>  Explore an extended list of compatible models (experimental) </summary>
@@ -84,7 +85,6 @@ The current version is verified to work with the following models:
 | [Selene-1-Mini-Llama-3.1-8B](https://huggingface.co/AtlaAI/Selene-1-Mini-Llama-3.1-8B)                                    | N300     | `AtlaAI/Selene-1-Mini-Llama-3.1-8B`                         |
 | [Sky-T1-32B-Preview](https://huggingface.co/NovaSky-AI/Sky-T1-32B-Preview)                                                | T3K      | `NovaSky-AI/Sky-T1-32B-Preview`                             |
 | [SmallThinker-3B-Preview](https://huggingface.co/PowerInfer/SmallThinker-3B-Preview)                                      | N150     | `PowerInfer/SmallThinker-3B-Preview`                        |
-| [SmolLM2-1.7B-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct)                                       | N150     | `HuggingFaceTB/SmolLM2-1.7B-Instruct`                       |
 | [Sqweeks-7B-Instruct](https://huggingface.co/prithivMLmods/Sqweeks-7B-Instruct)                                           | N300     | `prithivMLmods/Sqweeks-7B-Instruct`                         |
 | [TinyLlama-1.1B-Chat-v1.0](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)                                     | N150     | `TinyLlama/TinyLlama-1.1B-Chat-v1.0`                        |
 | [TinySwallow-1.5B](https://huggingface.co/SakanaAI/TinySwallow-1.5B)                                                      | N150     | `SakanaAI/TinySwallow-1.5B`                                 |

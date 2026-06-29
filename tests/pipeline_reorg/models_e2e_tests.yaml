@@ -106,6 +106,21 @@
   owner_id: U03PUAKE719 # Miguel Tairum Cruz
   team: models
 
+- name: SmolLM2-1.7B e2e tests
+  cmd: |
+    export HF_MODEL=HuggingFaceTB/SmolLM2-1.7B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/HuggingFaceTB/SmolLM2-1.7B-Instruct
+    pytest --timeout 420 models/tt_transformers/demo/simple_text_demo.py -k "performance-ci-token-matching"
+  model: smollm2-1.7b
+  skus:
+    bh_p150:
+      timeout: 5
+      tier: 3
+    bh_p100:
+      timeout: 5
+      tier: 3
+  owner_id: "@hous"
+  team: models
+
 - name: Llama 3.2-3B e2e tests
   cmd: |
     export HF_MODEL=meta-llama/Llama-3.2-3B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.2-3B-Instruct

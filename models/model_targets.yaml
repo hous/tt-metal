@@ -1256,6 +1256,37 @@ targets:
             accuracy:
               top1: 96
               top5: 100
+  smollm2-1.7b:
+    aliases: ["SmolLM2-1.7B", "SmolLM2-1.7B-Instruct", "HuggingFaceTB/SmolLM2-1.7B-Instruct"]
+    skus:
+      bh_p150:
+        entries:
+          # Measured on a single Blackhole p150 chip, performance-ci-token-matching (batch-1, 500 tokens).
+          # Measured: top1 87.60%, top5 98.60%. Targets set ~1pt below measured for CI headroom.
+          - batch_size: 1
+            seq_len: 512
+            status: active
+            perf:
+              decode_t/s/u: 50
+              decode_t/s: 50
+            accuracy:
+              top1: 87
+              top5: 98
+            owner_id: "@hous"
+            team: models
+      bh_p100:
+        entries:
+          # Accuracy inherited from bh_p150 (identical Blackhole numerics/ops).
+          # perf intentionally empty: decode t/s not yet measured on p100 hardware.
+          - batch_size: 1
+            seq_len: 512
+            status: active
+            perf: {}
+            accuracy:
+              top1: 87
+              top5: 98
+            owner_id: "@hous"
+            team: models
   whisper:
     aliases: ["whisper"]
     skus:
