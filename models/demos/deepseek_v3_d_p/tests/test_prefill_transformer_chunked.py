@@ -1540,6 +1540,59 @@ def test_kimi_prefill_transformer_chunked_padded(
     )
 
 
+# Trace+metadata twin of test_kimi_prefill_transformer_chunked_padded: the variable/partial-chunk prefill
+# run via a captured metadata ttnn trace replayed per split, asserting its per-layer KV-cache PCC matches
+# the untraced scalar path bit-exactly. Needs trace_region_size > 0; Kimi uses the DEVICE_FP32 gate + the
+# L1_SMALL semaphore region. The trace controller chops capture at the MoE sub-device load/clear.
+@pytest.mark.parametrize("splits", [_PADDED_FULL_55K], ids=["full55k"])
+@pytest.mark.parametrize("num_layers", [1, 10, 61], ids=["L1", "L10", "L61"])
+@pytest.mark.parametrize(
+    "mesh_device, device_params, num_links, topology",
+    [
+        pytest.param(
+            (8, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=KimiK26Config.FABRIC_PAYLOAD_SIZE),
+                "l1_small_size": 512,
+                "trace_region_size": 256 * 1024 * 1024,
+            },
+            2,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
+            id="mesh-8x4",
+        ),
+    ],
+    indirect=["mesh_device", "device_params"],
+)
+@pytest.mark.parametrize("variant", ["kimi_k2_6"], indirect=True, ids=["kimi"])
+@pytest.mark.skipif(not is_blackhole(), reason="Kimi requires Blackhole")
+@pytest.mark.timeout(0)
+def test_kimi_prefill_transformer_chunked_padded_trace(
+    variant,
+    config_only,
+    mesh_device,
+    device_params,
+    weight_cache_path,
+    num_layers,
+    splits,
+    num_links,
+    topology,
+):
+    run_chunked_transformer_padded_trace(
+        variant,
+        config_only,
+        mesh_device,
+        weight_cache_path,
+        num_layers,
+        splits,
+        GateComputeMode.DEVICE_FP32,
+        num_links,
+        topology,
+        routing_use_l1_small_for_semaphores=True,
+    )
+
+
 # No-PCC perf/smoke variant: build once, loop the forward `num_iters` times (no host readback, no PCC).
 # Always one chunk (0 KV cache, 5120 tokens) — the device-perf + e2e-perf driver in
 # tests/perf/test_prefill_chunked_perf.py only ever drives the single-chunk case.
