@@ -454,37 +454,14 @@ class TTSampling(LightweightModule):
                 line_all_gather_kwargs["dtype"] = dtype
             return self._line_all_gather(tensor, **line_all_gather_kwargs)
 
-        if self.tt_ccl is None:
-            # Some callers construct sampling with tt_ccl=None and rely on a plain all-gather that
-            # needs no CCL object / semaphores (e.g. gpt_oss on [4,8] meshes, gemma4). Keep that path.
-            return ttnn.all_gather(
-                tensor,
-                dim=dim,
-                num_links=num_links,
-                memory_config=memory_config,
-                cluster_axis=cluster_axis,
-                topology=ttnn.Topology.Linear,
-            )
-
-        # #48222: gather the heavy top-k/top-p candidates with a device-side barrier_semaphore,
-        # mirroring the force-argmax path. A plain `ttnn.all_gather` has no barrier, so inside the
-        # traced decode it can read the (async) upstream top-k output before it lands; at batch-32
-        # (more data in flight) this yields partial/stale candidates -> wrong tokens -> garbage.
-        # The barrier'd async gather is exactly what force-argmax uses and is correct at batch-32.
-        topology = self.ag_topology if self.mesh_device.get_num_devices() >= 8 else ttnn.Topology.Linear
-        return ttnn.experimental.all_gather_async(
+        # [prefill-sync experiment] BROKEN op: plain ttnn.all_gather (the pre-#48404 fallback).
+        return ttnn.all_gather(
             tensor,
-            persistent_output_buffer=None,
             dim=dim,
-            multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(cluster_axis),
             num_links=num_links,
             memory_config=memory_config,
             cluster_axis=cluster_axis,
-            topology=topology,
-            barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis),
-            chunks_per_sync=self.argmax_chunks_per_sync,
-            num_workers_per_link=self.argmax_num_workers_per_link,
-            num_buffers_per_channel=2,
+            topology=ttnn.Topology.Linear,
         )
 
     def _get_sampling_cluster_axis(self):

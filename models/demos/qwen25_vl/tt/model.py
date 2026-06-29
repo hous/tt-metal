@@ -366,7 +366,7 @@ class Transformer(TTTransformer):
         # which forces greedy decode onto the heavy top-k/top-p pipeline that corrupts at
         # batch-32 (#48037). Must be set before super().__init__ builds the sampling module.
         ag_cfg = dict(args.model_config.get("SAMPLING_AG_CONFIG", {}) or {})
-        ag_cfg["allow_force_argmax"] = True
+        ag_cfg["allow_force_argmax"] = False  # [prefill-sync experiment] force the heavy top-k/top-p path
         args.model_config["SAMPLING_AG_CONFIG"] = ag_cfg
 
         # Call parent constructor with vision-specific classes
