@@ -86,8 +86,8 @@ ttnn:
     wh_n300_civ2: 545
     bh_p100: 545
     bh_p150b_civ2: 545
-    sim_wormhole_b0: 560
-    sim_blackhole: 600
+    sim_wormhole_b0: 680
+    sim_blackhole: 680
   unit:
     wh_llmbox: 50
     wh_galaxy: 35
