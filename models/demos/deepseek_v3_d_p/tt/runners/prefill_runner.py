@@ -394,6 +394,9 @@ def main() -> None:
 
     if os.environ.get("PREFILL_STANDALONE", "0") == "1":
         # Truly standalone: file input, no H2D socket service at all.
+        # Capture the metadata trace explicitly after compile() (no-op unless PREFILL_USE_TRACE); the
+        # standalone loop has no LayerAck channel, so this captures a migration-off trace.
+        pipeline.capture_trace()
         logger.info("Setup complete, running standalone loop (file input, no socket)")
         run_standalone_loop(pipeline)
     else:
@@ -438,6 +441,10 @@ def main() -> None:
         ack_channel = ttnn.InterProcessCounterChannel(ack_shm_name)
         pipeline.set_layer_ack_channel(ack_channel)
         logger.info(f"[migration] LayerAck channel ready at {ack_shm_name}; runner emits one ack per layer")
+
+        # Capture the metadata trace explicitly, AFTER the LayerAck channel is registered so the per-layer
+        # migration ack is chopped into the trace (no-op unless PREFILL_USE_TRACE). prefill() then replays.
+        pipeline.capture_trace()
 
         logger.info("Setup complete, entering request loop")
         run_request_loop(pipeline, h2d_service)

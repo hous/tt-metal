@@ -254,13 +254,20 @@ class TtDeepSeekPrefillPipeline:
             f"trace segments, {trace_bytes / (1024 * 1024):.2f} MB ({trace_bytes:,} bytes)"
         )
 
-    def _capture_metadata_trace(self) -> None:
-        """Lazily capture the metadata-driven forward ONCE (on the first prefill, after any LayerAck
-        channel is registered). Allocates the persistent token + metadata buffers, compiles the metadata
-        op variants (a metadata warmup — distinct program hash from the scalar path), then captures the
-        forward with the controller chopping at MoE sub-device swaps AND (if migration is on) at each
-        per-layer ack. The per-chunk scalars are NOT baked: replay reads them from the persistent metadata
-        tensor that prefill() updates in-place. See utils/sub_device_trace.py."""
+    def capture_trace(self) -> None:
+        """Capture the metadata-driven forward ONCE as a (segmented) ttnn trace. Call this explicitly
+        AFTER compile() — and, for the request loop, AFTER set_layer_ack_channel() so the per-layer
+        migration ack is wired into the controller before capture. Subsequent prefill() calls just
+        replay the trace (updating the persistent token + metadata buffers in place per chunk).
+
+        Allocates the persistent token + metadata buffers, compiles the metadata op variants (a metadata
+        warmup — distinct program hash from the scalar path), then captures the forward with the
+        controller chopping at MoE sub-device swaps AND (if migration is on) at each per-layer ack. The
+        per-chunk scalars are NOT baked: replay reads them from the persistent metadata tensor. No-op if
+        not config.use_metadata_trace, or if already captured. See utils/sub_device_trace.py."""
+        assert self.compiled, "call compile() before capture_trace()"
+        if not self.config.use_metadata_trace or self._metadata_trace_captured:
+            return
         import torch
 
         chunk = self.config.chunk_size
@@ -366,8 +373,7 @@ class TtDeepSeekPrefillPipeline:
             # fresh allocation would land at a different address and the replay would read freed memory).
             import torch
 
-            if not self._metadata_trace_captured:
-                self._capture_metadata_trace()
+            assert self._metadata_trace_captured, "call pipeline.capture_trace() after compile() before prefill()"
             ttnn.copy(input_tensor, self._trace_input)  # device->device into the persistent buffer
             ttnn.deallocate(input_tensor)
             meta_host = ttnn.from_torch(
