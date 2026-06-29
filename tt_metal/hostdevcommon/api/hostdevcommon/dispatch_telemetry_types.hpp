@@ -24,6 +24,7 @@ constexpr uint32_t DISPATCH_TELEMETRY_VERSION = 1;
 /**
  * @brief Expected signature for validating that a telemetry buffer contains dispatch telemetry data.
  */
+constexpr uint32_t SMC_TELEMETRY_SIGNATURE = detail::pack("SMC_");
 constexpr uint32_t DISPATCH_CORE_TELEMETRY_SIGNATURE = detail::pack("DISP");
 constexpr uint32_t PREFETCH_CORE_TELEMETRY_SIGNATURE = detail::pack("PREF");
 
@@ -107,6 +108,34 @@ struct __attribute__((packed, aligned(4))) DispatchTelemetryControl {
     // dispatch_s writes, dispatch_s_compute reads.
     // Records value of the stream semaphore when launching a new workload.
     uint32_t launched_work_start_stream_sem[RESERVED_SUB_DEVICE_SPACE] = {0};
+};
+
+struct __attribute__((packed)) SMCDispatchCoreCoords {
+    uint32_t prefetch_xy = 0;
+    uint32_t dispatch_xy = 0;
+    uint32_t dispatch_s_xy = 0;
+};
+
+constexpr uint32_t get_smc_dispatch_core_x(uint32_t xy) { return xy >> 16; }
+
+constexpr uint32_t get_smc_dispatch_core_y(uint32_t xy) { return xy & 0xFFFF; }
+
+constexpr uint32_t set_smc_dispatch_core_xy(uint16_t x, uint16_t y) { return (x << 16) | y; }
+
+constexpr uint32_t MAX_DISPATCH_CORES_PER_CQ = sizeof(SMCDispatchCoreCoords) / sizeof(uint32_t);
+constexpr uint32_t RESERVED_FD_CQ_SPACE = 3;
+static_assert(MAX_NUM_HW_CQS <= RESERVED_FD_CQ_SPACE, "Max number of hardware CQs exceeds reserved space");
+
+// TODO: Probably needs to be uint32_t due to access and alignment requirements.
+//       Figure out if it needs accessible version/sig or not.
+struct __attribute__((packed)) SMCDispatchTelemetryControl {
+    uint32_t version = DISPATCH_TELEMETRY_VERSION;
+    uint32_t signature = SMC_TELEMETRY_SIGNATURE;
+    uint32_t flags = 0;
+    uint32_t num_hw_cqs = RESERVED_FD_CQ_SPACE;
+    SMCDispatchCoreCoords cq_dispatch_core_coords[RESERVED_FD_CQ_SPACE];
+    struct __attribute__((packed)) SDTelemetry {
+    } sd_telemetry;
 };
 
 }  // namespace tt::tt_metal

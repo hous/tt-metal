@@ -7,10 +7,14 @@
 #include <optional>
 #include <limits>
 #include <algorithm>
+#include <cstdint>
 #include <type_traits>
 
 #include <tt-metalium/experimental/dispatch_telemetry.hpp>
 #include <tt-logger/tt-logger.hpp>
+#include <umd/device/arch/blackhole_implementation.hpp>
+#include <umd/device/tt_device/tt_device.hpp>
+#include <umd/device/types/noc_id.hpp>
 #include <umd/device/types/xy_pair.hpp>
 
 #include "device.hpp"
@@ -30,29 +34,106 @@ namespace tt::tt_metal {
 
 namespace {
 
+struct RtTelemetryLoc {
+    tt_xy_pair arc_core;
+    uint64_t addr = 0;
+    uint32_t size = 0;
+};
+
+inline constexpr uint32_t SCRATCH_RAM_22 = tt::umd::blackhole::ARC_RESET_UNIT_OFFSET + 0x400 + 0x4 * 22;
+inline constexpr uint32_t SCRATCH_RAM_23 = tt::umd::blackhole::ARC_RESET_UNIT_OFFSET + 0x400 + 0x4 * 23;
+
+std::optional<RtTelemetryLoc> discover_runtime_telemetry(tt::umd::TTDevice& tt_device) {
+    RtTelemetryLoc loc{};
+    loc.arc_core = tt_device.get_arc_core();
+
+    switch (tt_device.get_arch()) {
+        case tt::ARCH::BLACKHOLE: {
+            uint32_t addr32 = 0;
+            uint32_t size32 = 0;
+            tt_device.read_from_arc_apb(&addr32, SCRATCH_RAM_22, sizeof(addr32));
+            tt_device.read_from_arc_apb(&size32, SCRATCH_RAM_23, sizeof(size32));
+            loc.addr = addr32;
+            loc.size = size32;
+            break;
+        }
+        default:
+            log_warning(tt::LogMetal, "Dispatch telemetry SMC buffer discovery is not supported on this arch");
+            return std::nullopt;
+    }
+
+    return loc;
+}
+
+std::optional<SMCDispatchTelemetryControl> read_smc_dispatch_telemetry_control(tt::umd::TTDevice& tt_device) {
+    auto loc = discover_runtime_telemetry(tt_device);
+    if (!loc.has_value()) {
+        return std::nullopt;
+    }
+    if (loc->size == 0) {
+        log_warning(tt::LogMetal, "Dispatch telemetry SMC buffer is unavailable");
+        return std::nullopt;
+    }
+    if (loc->size < sizeof(SMCDispatchTelemetryControl)) {
+        log_warning(
+            tt::LogMetal,
+            "Dispatch telemetry SMC buffer is too small: got {} bytes, expected at least {} bytes",
+            loc->size,
+            sizeof(SMCDispatchTelemetryControl));
+        return std::nullopt;
+    }
+
+    SMCDispatchTelemetryControl control{};
+    tt::umd::NocIdSwitcher noc0(tt::umd::NocId::NOC0);
+    tt_device.read_from_device(&control, loc->arc_core, loc->addr, sizeof(control));
+
+    if (control.signature != SMC_TELEMETRY_SIGNATURE) {
+        uint32_t control_signature = control.signature;
+        log_warning(
+            tt::LogMetal,
+            "SMC dispatch telemetry signature mismatch: got 0x{:x}, expected 0x{:x}",
+            control_signature,
+            SMC_TELEMETRY_SIGNATURE);
+        return std::nullopt;
+    }
+    if (control.version != DISPATCH_TELEMETRY_VERSION) {
+        uint32_t control_version = control.version;
+        log_warning(
+            tt::LogMetal,
+            "SMC dispatch telemetry version mismatch: got {}, expected {}",
+            control_version,
+            DISPATCH_TELEMETRY_VERSION);
+        return std::nullopt;
+    }
+
+    return control;
+}
+
+// TODO: Maybe consolidate to dispatch_telemetry_types.hpp ?
+tt_xy_pair smc_xy_to_noc0_core(uint32_t xy) {
+    return tt_xy_pair{get_smc_dispatch_core_x(xy), get_smc_dispatch_core_y(xy)};
+}
+
 template <typename T>
-std::optional<T> read_telemetry_impl(ChipId chip, const CoreCoord& virtual_core, uint32_t signature, uint32_t version) {
+std::optional<T> read_telemetry_impl(
+    tt::umd::TTDevice& tt_device, tt_xy_pair noc0_core, uint32_t signature, uint32_t version) {
     // Telemetry lives at a fixed dispatch-core-local L1 offset assigned by DispatchMemMap.
     // Prefetch and dispatch both use this section depending on which one is running on the core.
     const auto& dispatch_mem_map = MetalContext::instance().dispatch_mem_map();
     uint32_t addr = dispatch_mem_map.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_TELEMETRY);
 
-    // Make sure any in-flight kernel writes to L1 are visible before we sample.
-    const auto& cluster = MetalContext::instance().get_cluster();
-    cluster.l1_barrier(chip);
-
     T telemetry{};
-    cluster.read_core(&telemetry, sizeof(telemetry), tt_cxy_pair(chip, virtual_core), addr);
+    tt::umd::NocIdSwitcher noc0(tt::umd::NocId::NOC0);
+    tt_device.read_from_device(&telemetry, noc0_core, addr, sizeof(telemetry));
 
     if (telemetry.signature != signature) {
         // Copy to avoid taking a reference to a packed struct's member variable, which could be unaligned.
         uint32_t telemetry_signature = telemetry.signature;
         log_warning(
             tt::LogMetal,
-            "Signature mismatch on chip {} core ({},{}): got 0x{:x}, expected 0x{:x}",
-            chip,
-            virtual_core.x,
-            virtual_core.y,
+            "Signature mismatch on NOC0 core ({},{}): got 0x{:x}, expected 0x{:x}",
+            noc0_core.x,
+            noc0_core.y,
             telemetry_signature,
             signature);
         return std::nullopt;
@@ -62,10 +143,9 @@ std::optional<T> read_telemetry_impl(ChipId chip, const CoreCoord& virtual_core,
         uint32_t telemetry_version = telemetry.version;
         log_warning(
             tt::LogMetal,
-            "Version mismatch on chip {} core ({},{}): got {}, expected {}",
-            chip,
-            virtual_core.x,
-            virtual_core.y,
+            "Version mismatch on NOC0 core ({},{}): got {}, expected {}",
+            noc0_core.x,
+            noc0_core.y,
             telemetry_version,
             version);
         return std::nullopt;
@@ -85,14 +165,14 @@ T calc_delta(T current, T last) {
 
 }  // namespace
 
-std::optional<DispatchCoreTelemetry> read_dispatch_core_telemetry(ChipId chip, const CoreCoord& virtual_core) {
+std::optional<DispatchCoreTelemetry> read_dispatch_core_telemetry(tt::umd::TTDevice& tt_device, tt_xy_pair noc0_core) {
     return read_telemetry_impl<DispatchCoreTelemetry>(
-        chip, virtual_core, DISPATCH_CORE_TELEMETRY_SIGNATURE, DISPATCH_TELEMETRY_VERSION);
+        tt_device, noc0_core, DISPATCH_CORE_TELEMETRY_SIGNATURE, DISPATCH_TELEMETRY_VERSION);
 }
 
-std::optional<PrefetchCoreTelemetry> read_prefetch_core_telemetry(ChipId chip, const CoreCoord& virtual_core) {
+std::optional<PrefetchCoreTelemetry> read_prefetch_core_telemetry(tt::umd::TTDevice& tt_device, tt_xy_pair noc0_core) {
     return read_telemetry_impl<PrefetchCoreTelemetry>(
-        chip, virtual_core, PREFETCH_CORE_TELEMETRY_SIGNATURE, DISPATCH_TELEMETRY_VERSION);
+        tt_device, noc0_core, PREFETCH_CORE_TELEMETRY_SIGNATURE, DISPATCH_TELEMETRY_VERSION);
 }
 
 class DispatchTelemetry::Impl {
@@ -108,96 +188,84 @@ private:
 
     struct CoreEntry {
         CoreRole role = CoreRole::INVALID;
-        CoreCoord virtual_core;  // read_core needs a virtual (noc-addressable) coord
-        uint8_t cq_id;
+        tt_xy_pair noc0_core;
+        uint8_t cq_id = 0;
     };
 
-    // TODO: replace with querying device without device instance or bake into telemetry
-    static uint32_t get_total_worker_and_active_eth_cores(const IDevice& device) {
-        auto& env = MetalEnvAccessor(tt::tt_metal::MetalContext::instance().get_env()).impl();
-        auto& dcm = MetalContext::instance().get_dispatch_core_manager();
+    // TODO: is this really necessary?
+    struct CqLayout {
+        uint8_t cq_id = 0;
+        uint32_t prefetch_xy = 0;
+        uint32_t dispatch_xy = 0;
+        uint32_t dispatch_s_xy = 0;
 
-        const auto& compute_cores =
-            tt::get_logical_compute_cores(env, device.id(), device.num_hw_cqs(), dcm.get_dispatch_core_config());
+        bool operator==(const CqLayout& other) const {
+            return cq_id == other.cq_id && prefetch_xy == other.prefetch_xy && dispatch_xy == other.dispatch_xy &&
+                   dispatch_s_xy == other.dispatch_s_xy;
+        }
+    };
 
-        uint32_t total_cores = compute_cores.size();
-        total_cores += device.get_active_ethernet_cores(/*skip_reserved_tunnel_cores=*/true).size();
+    struct CoreCollection {
+        std::vector<std::vector<CoreEntry>> entries_per_active_cq;
+        std::vector<CqLayout> layout;
+    };
+
+    static uint32_t get_total_worker_and_active_eth_cores(tt::umd::TTDevice& tt_device) {
+        const auto& soc_desc = tt_device.get_soc_descriptor();
+        uint32_t total_cores = soc_desc.get_cores(tt::CoreType::TENSIX, tt::CoordSystem::NOC0).size();
+        total_cores += soc_desc.get_cores(tt::CoreType::ACTIVE_ETH, tt::CoordSystem::NOC0).size();
         return total_cores;
     }
 
-    std::vector<std::vector<CoreEntry>> collect_telemetry_cores(const IDevice& device) {
-        std::vector<std::vector<CoreEntry>> entries;
-
-        auto& dcm = MetalContext::instance().get_dispatch_core_manager();
-        const auto& cluster = MetalContext::instance().get_cluster();
-        const ChipId chip = device.id();
-        const uint16_t channel = cluster.get_assigned_channel_for_device(chip);
-        const uint8_t num_cqs = device.num_hw_cqs();
-        const CoreType core_type = MetalContext::instance().get_dispatch_core_manager().get_dispatch_core_type();
-
-        for (uint8_t cq = 0; cq < num_cqs; ++cq) {
-            std::vector<CoreEntry> cq_entries;
-            if (dcm.is_prefetcher_core_allocated(chip, channel, cq)) {
-                CoreEntry entry{};
-                entry.role = CoreRole::PREFETCH;
-                tt_cxy_pair logical_cxy = dcm.prefetcher_core(chip, channel, cq);
-                entry.virtual_core =
-                    device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
-                entry.cq_id = cq;
-                cq_entries.push_back(entry);
-            }
-            if (dcm.is_prefetcher_d_core_allocated(chip, channel, cq)) {
-                CoreEntry entry{};
-                entry.role = CoreRole::PREFETCH_D;
-                tt_cxy_pair logical_cxy = dcm.prefetcher_d_core(chip, channel, cq);
-                entry.virtual_core =
-                    device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
-                entry.cq_id = cq;
-                cq_entries.push_back(entry);
-            }
-            if (dcm.is_dispatcher_core_allocated(chip, channel, cq)) {
-                CoreEntry entry{};
-                entry.role = CoreRole::DISPATCH;
-                tt_cxy_pair logical_cxy = dcm.dispatcher_core(chip, channel, cq);
-                entry.virtual_core =
-                    device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
-                entry.cq_id = cq;
-                cq_entries.push_back(entry);
-            }
-            if (dcm.is_dispatcher_d_core_allocated(chip, channel, cq)) {
-                CoreEntry entry{};
-                entry.role = CoreRole::DISPATCH_D;
-                tt_cxy_pair logical_cxy = dcm.dispatcher_d_core(chip, channel, cq);
-                entry.virtual_core =
-                    device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
-                entry.cq_id = cq;
-                cq_entries.push_back(entry);
-            }
-            if (dcm.is_dispatcher_s_core_allocated(chip, channel, cq)) {
-                CoreEntry entry{};
-                entry.role = CoreRole::DISPATCH_S;
-                tt_cxy_pair logical_cxy = dcm.dispatcher_s_core(chip, channel, cq);
-                entry.virtual_core =
-                    device.virtual_core_from_logical_core(CoreCoord{logical_cxy.x, logical_cxy.y}, core_type);
-                entry.cq_id = cq;
-                cq_entries.push_back(entry);
-            }
-            entries.push_back(cq_entries);
+    std::optional<CoreCollection> collect_telemetry_cores() {
+        auto control = read_smc_dispatch_telemetry_control(tt_device_);
+        if (!control.has_value()) {
+            return std::nullopt;
         }
 
-        return entries;
+        CoreCollection collection;
+        const uint32_t num_cqs = std::min(control->num_hw_cqs, static_cast<uint32_t>(RESERVED_FD_CQ_SPACE));
+
+        for (uint8_t cq = 0; cq < num_cqs; ++cq) {
+            const auto& core_coords = control->cq_dispatch_core_coords[cq];
+            if (core_coords.prefetch_xy == 0 || core_coords.dispatch_xy == 0) {
+                continue;
+            }
+
+            std::vector<CoreEntry> cq_entries;
+
+            cq_entries.push_back(CoreEntry{
+                .role = CoreRole::PREFETCH, .noc0_core = smc_xy_to_noc0_core(core_coords.prefetch_xy), .cq_id = cq});
+            cq_entries.push_back(CoreEntry{
+                .role = CoreRole::DISPATCH, .noc0_core = smc_xy_to_noc0_core(core_coords.dispatch_xy), .cq_id = cq});
+
+            if (core_coords.dispatch_s_xy != 0) {
+                // TODO: Handle dispatch_s telemetry once SMC-discovered dispatch_s data is consumed here.
+                cq_entries.push_back(CoreEntry{
+                    .role = CoreRole::DISPATCH_S,
+                    .noc0_core = smc_xy_to_noc0_core(core_coords.dispatch_s_xy),
+                    .cq_id = cq});
+            }
+
+            collection.entries_per_active_cq.push_back(std::move(cq_entries));
+            collection.layout.push_back(CqLayout{
+                .cq_id = cq,
+                .prefetch_xy = core_coords.prefetch_xy,
+                .dispatch_xy = core_coords.dispatch_xy,
+                .dispatch_s_xy = core_coords.dispatch_s_xy});
+        }
+
+        if (collection.entries_per_active_cq.empty()) {
+            log_warning(tt::LogMetal, "No active dispatch telemetry CQs found in SMC control block");
+            return std::nullopt;
+        }
+
+        return collection;
     }
 
 public:
-    Impl(const IDevice& device) :
-        chip_(device.id()),
-        dispatch_core_type_(MetalContext::instance().get_dispatch_core_manager().get_dispatch_core_type()),
-        total_number_of_cores_(get_total_worker_and_active_eth_cores(device)),
-        // TODO: Note: current impl assumes cq count won't change during its object lifetime
-        telemetry_cores_per_cq_(collect_telemetry_cores(device)),
-        last_read_dispatch_core_telemetry_(telemetry_cores_per_cq_.size()),
-        last_read_prefetch_core_telemetry_(telemetry_cores_per_cq_.size()) {
-        TT_FATAL(!telemetry_cores_per_cq_.empty(), "No dispatch telemetry cores found on device\n");
+    Impl(tt::umd::TTDevice& device) :
+        tt_device_(device), total_number_of_cores_(get_total_worker_and_active_eth_cores(device)) {
         // Init private members to construction time
         (void)read_info();
     }
@@ -309,24 +377,19 @@ public:
         return std::clamp(core_efficiency, 0.0f, 1.0f);
     }
 
-    // Telemetry will be assembled in order according to its pre-calculated cq id.
-    // This id correlates to core coordinates, so it is static for the lifetime of the
-    // object.
     bool read_core_telemetry(
+        const std::vector<std::vector<CoreEntry>>& entries_per_active_cq,
         std::vector<DispatchCoreTelemetry>& current_dispatch_core_telemetry,
         std::vector<PrefetchCoreTelemetry>& current_prefetch_core_telemetry) {
         TT_ASSERT(
-            current_dispatch_core_telemetry.size() == telemetry_cores_per_cq_.size(),
-            "Invalid dispatch telemetry size");
+            current_dispatch_core_telemetry.size() == entries_per_active_cq.size(), "Invalid dispatch telemetry size");
         TT_ASSERT(
-            current_prefetch_core_telemetry.size() == telemetry_cores_per_cq_.size(),
-            "Invalid prefetch telemetry size");
+            current_prefetch_core_telemetry.size() == entries_per_active_cq.size(), "Invalid prefetch telemetry size");
 
-        for (size_t cq = 0; cq < telemetry_cores_per_cq_.size(); ++cq) {
-            const auto& cq_entries = telemetry_cores_per_cq_[cq];
+        for (size_t cq = 0; cq < entries_per_active_cq.size(); ++cq) {
+            const auto& cq_entries = entries_per_active_cq[cq];
             if (cq_entries.empty()) {
                 log_warning(tt::LogMetal, "No dispatch telemetry cores found for CQ {}", cq);
-                // TODO: does this trigger on slow dispatch?
                 return false;
             }
 
@@ -335,7 +398,7 @@ public:
 
             for (const auto& core : cq_entries) {
                 if (core.role == CoreRole::PREFETCH || core.role == CoreRole::PREFETCH_D) {
-                    auto telemetry = read_prefetch_core_telemetry(chip_, core.virtual_core);
+                    auto telemetry = read_prefetch_core_telemetry(tt_device_, core.noc0_core);
                     if (telemetry) {
                         TT_ASSERT(!found_prefetch_core, "Ensure only one prefetcher is found");
                         found_prefetch_core = true;
@@ -343,7 +406,7 @@ public:
                     }
                 }
                 if (core.role == CoreRole::DISPATCH || core.role == CoreRole::DISPATCH_D) {
-                    auto telemetry = read_dispatch_core_telemetry(chip_, core.virtual_core);
+                    auto telemetry = read_dispatch_core_telemetry(tt_device_, core.noc0_core);
                     if (telemetry) {
                         // TODO: for now
                         TT_ASSERT(!found_dispatch_core, "Ensure only worker dispatch is found");
@@ -364,11 +427,15 @@ public:
     }
 
     std::optional<DispatchTelemetryDeviceInfo> compute_telemetry_info(
+        const std::vector<std::vector<CoreEntry>>& entries_per_active_cq,
         const std::vector<DispatchCoreTelemetry>& current_dispatch_core_telemetry,
         const std::vector<PrefetchCoreTelemetry>& current_prefetch_core_telemetry) {
         TT_ASSERT(
             current_dispatch_core_telemetry.size() == current_prefetch_core_telemetry.size(),
             "Ensure there is one of each per cq");
+        TT_ASSERT(
+            entries_per_active_cq.size() == current_prefetch_core_telemetry.size(),
+            "Ensure telemetry and core entries are aligned");
         DispatchTelemetryDeviceInfo device_info;
         device_info.info_cqs.resize(current_prefetch_core_telemetry.size());
 
@@ -378,8 +445,9 @@ public:
         for (size_t cq = 0; cq < current_prefetch_core_telemetry.size(); ++cq) {
             auto& cq_info = device_info.info_cqs[cq];
             const auto& prefetch_telemetry = current_prefetch_core_telemetry[cq];
+            TT_ASSERT(!entries_per_active_cq[cq].empty(), "Missing dispatch telemetry core entry");
 
-            cq_info.cq_id = cq;
+            cq_info.cq_id = entries_per_active_cq[cq].front().cq_id;
             cq_info.prefetch_waiting_on_upstream =
                 (prefetch_telemetry.upstream_blocked_count != prefetch_telemetry.upstream_unblocked_count);
             cq_info.prefetch_blocked_count_since_last_read = calc_delta(
@@ -394,7 +462,7 @@ public:
             auto& cq_info = device_info.info_cqs[cq];
             const auto& dispatch_telemetry = current_dispatch_core_telemetry[cq];
 
-            TT_ASSERT(cq_info.cq_id == cq, "cq_id mismatch");
+            TT_ASSERT(cq_info.cq_id == entries_per_active_cq[cq].front().cq_id, "cq_id mismatch");
 
             cq_info.dispatch_waiting_on_upstream =
                 (dispatch_telemetry.upstream_blocked_count != dispatch_telemetry.upstream_unblocked_count);
@@ -413,26 +481,42 @@ public:
     }
 
     std::optional<DispatchTelemetryDeviceInfo> read_info() {
-        std::vector<DispatchCoreTelemetry> current_dispatch_core_telemetry(telemetry_cores_per_cq_.size());
-        std::vector<PrefetchCoreTelemetry> current_prefetch_core_telemetry(telemetry_cores_per_cq_.size());
-
-        if (!read_core_telemetry(current_dispatch_core_telemetry, current_prefetch_core_telemetry)) {
+        auto core_collection = collect_telemetry_cores();
+        if (!core_collection.has_value()) {
             return std::nullopt;
         }
 
-        return compute_telemetry_info(current_dispatch_core_telemetry, current_prefetch_core_telemetry);
+        const auto& entries_per_active_cq = core_collection->entries_per_active_cq;
+        std::vector<DispatchCoreTelemetry> current_dispatch_core_telemetry(entries_per_active_cq.size());
+        std::vector<PrefetchCoreTelemetry> current_prefetch_core_telemetry(entries_per_active_cq.size());
+
+        if (!read_core_telemetry(
+                entries_per_active_cq, current_dispatch_core_telemetry, current_prefetch_core_telemetry)) {
+            return std::nullopt;
+        }
+
+        if (core_collection->layout != last_read_layout_ ||
+            last_read_dispatch_core_telemetry_.size() != current_dispatch_core_telemetry.size() ||
+            last_read_prefetch_core_telemetry_.size() != current_prefetch_core_telemetry.size()) {
+            last_read_layout_ = core_collection->layout;
+            last_read_dispatch_core_telemetry_ = current_dispatch_core_telemetry;
+            last_read_prefetch_core_telemetry_ = current_prefetch_core_telemetry;
+            return std::nullopt;
+        }
+
+        return compute_telemetry_info(
+            entries_per_active_cq, current_dispatch_core_telemetry, current_prefetch_core_telemetry);
     }
 
 private:
-    ChipId chip_;
-    CoreType dispatch_core_type_;
+    tt::umd::TTDevice& tt_device_;
     uint32_t total_number_of_cores_;
-    std::vector<std::vector<CoreEntry>> telemetry_cores_per_cq_;
+    std::vector<CqLayout> last_read_layout_;
     std::vector<DispatchCoreTelemetry> last_read_dispatch_core_telemetry_;
     std::vector<PrefetchCoreTelemetry> last_read_prefetch_core_telemetry_;
 };
 
-DispatchTelemetry::DispatchTelemetry(const IDevice& device) : impl_(std::make_unique<Impl>(device)) {}
+DispatchTelemetry::DispatchTelemetry(tt::umd::TTDevice& device) : impl_(std::make_unique<Impl>(device)) {}
 
 DispatchTelemetry::~DispatchTelemetry() = default;
 

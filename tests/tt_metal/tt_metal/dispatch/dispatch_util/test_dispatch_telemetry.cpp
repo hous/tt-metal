@@ -17,6 +17,8 @@
 #include <tt-metalium/sub_device.hpp>
 #include <tt-metalium/sub_device_types.hpp>
 #include <tt-metalium/tt_metal.hpp>
+#include <umd/device/tt_device/tt_device.hpp>
+#include <umd/device/types/core_coordinates.hpp>
 
 #include "command_queue_fixture.hpp"
 #include "multi_command_queue_fixture.hpp"
@@ -68,6 +70,16 @@ protected:
     }
 
     IDevice* device() const { return devices_.at(0)->get_devices().front(); }
+
+    tt::umd::TTDevice& tt_device() const {
+        return *MetalContext::instance().get_cluster().get_driver()->get_tt_device(device()->id());
+    }
+
+    tt_xy_pair noc0_core_from_virtual_core(const CoreCoord& virtual_core) const {
+        const auto noc0_core = tt_device().get_soc_descriptor().translate_coord_to(
+            virtual_core, tt::CoordSystem::TRANSLATED, tt::CoordSystem::NOC0);
+        return tt_xy_pair{noc0_core.x, noc0_core.y};
+    }
 
     bool worker_dispatch_enabled() const {
         return MetalContext::instance().get_dispatch_core_manager().get_dispatch_core_type() == CoreType::WORKER;
@@ -150,6 +162,16 @@ protected:
 
     IDevice* device() const { return device_->get_devices().front(); }
 
+    tt::umd::TTDevice& tt_device() const {
+        return *MetalContext::instance().get_cluster().get_driver()->get_tt_device(device()->id());
+    }
+
+    tt_xy_pair noc0_core_from_virtual_core(const CoreCoord& virtual_core) const {
+        const auto noc0_core = tt_device().get_soc_descriptor().translate_coord_to(
+            virtual_core, tt::CoordSystem::TRANSLATED, tt::CoordSystem::NOC0);
+        return tt_xy_pair{noc0_core.x, noc0_core.y};
+    }
+
     std::optional<CoreCoord> dispatch_s_virtual_core(uint8_t cq_id = 0) const {
         if (!MetalContext::instance().get_dispatch_query_manager().dispatch_s_enabled()) {
             return std::nullopt;
@@ -211,6 +233,10 @@ protected:
     }
 
     IDevice* device() const { return mesh_device_->get_devices().front(); }
+
+    tt::umd::TTDevice& tt_device() const {
+        return *MetalContext::instance().get_cluster().get_driver()->get_tt_device(device()->id());
+    }
 
     std::shared_ptr<distributed::MeshDevice> mesh_device_;
 };
@@ -324,7 +350,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadDispatchCoreTelemetryFromWorkerL1) {
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_dispatch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     ASSERT_TRUE(actual.has_value());
     EXPECT_EQ(actual->upstream_blocked_count, telemetry.upstream_blocked_count);
@@ -345,7 +371,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadDispatchCoreTelemetryFromEthL1) {
     write_telemetry(CoreType::ETH, *core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(*core, CoreType::ETH);
-    auto actual = read_dispatch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     ASSERT_TRUE(actual.has_value());
     EXPECT_EQ(actual->upstream_blocked_count, telemetry.upstream_blocked_count);
@@ -360,7 +386,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadDispatchCoreTelemetryRejectsBadSignatur
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_dispatch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     EXPECT_FALSE(actual.has_value());
 }
@@ -372,7 +398,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadDispatchCoreTelemetryRejectsBadVersion)
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_dispatch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     EXPECT_FALSE(actual.has_value());
 }
@@ -386,7 +412,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadPrefetchTelemetryFromWorkerL1) {
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_prefetch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_prefetch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     ASSERT_TRUE(actual.has_value());
     EXPECT_EQ(actual->upstream_blocked_count, telemetry.upstream_blocked_count);
@@ -407,7 +433,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadPrefetchTelemetryFromEthL1) {
     write_telemetry(CoreType::ETH, *core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(*core, CoreType::ETH);
-    auto actual = read_prefetch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_prefetch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     ASSERT_TRUE(actual.has_value());
     EXPECT_EQ(actual->upstream_blocked_count, telemetry.upstream_blocked_count);
@@ -422,7 +448,7 @@ TEST_F(DispatchTelemetryReadApiTest, ReadPrefetchTelemetryRejectsBadSignature) {
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_prefetch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_prefetch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     EXPECT_FALSE(actual.has_value());
 }
@@ -434,13 +460,13 @@ TEST_F(DispatchTelemetryReadApiTest, ReadPrefetchTelemetryRejectsBadVersion) {
     write_telemetry(CoreType::WORKER, core, telemetry);
 
     const CoreCoord virtual_core = device()->virtual_core_from_logical_core(core, CoreType::WORKER);
-    auto actual = read_prefetch_core_telemetry(device()->id(), virtual_core);
+    auto actual = read_prefetch_core_telemetry(tt_device(), noc0_core_from_virtual_core(virtual_core));
 
     EXPECT_FALSE(actual.has_value());
 }
 
 TEST_F(DispatchTelemetrySlowDispatchTest, ReadInfoReturnsNulloptButVersionIsValid) {
-    DispatchTelemetry telemetry(*device());
+    DispatchTelemetry telemetry(tt_device());
 
     auto info = telemetry.read_info();
     EXPECT_FALSE(info.has_value());
@@ -449,7 +475,6 @@ TEST_F(DispatchTelemetrySlowDispatchTest, ReadInfoReturnsNulloptButVersionIsVali
 }
 
 TEST_F(DispatchTelemetryReadApiTest, DispatchCoreProgramCount) {
-    IDevice* device = this->device();
     auto& cq = devices_.at(0)->mesh_command_queue();
     constexpr size_t total_runs = 10;
     constexpr size_t num_blank_programs = 16;
@@ -457,7 +482,7 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchCoreProgramCount) {
     // Verify it increments per program regardless of core count
     const CoreRangeSet worker_cores{CoreRange(CoreCoord{0, 0}, CoreCoord{1, 1})};
 
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
     auto initial = telemetry.read_info();
     ASSERT_TRUE(initial.has_value());
     ASSERT_FALSE(initial->info_cqs.empty());
@@ -494,13 +519,12 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchCoreProgramCountForTraceReplay) {
         GTEST_SKIP() << "Requires dispatch_s to be enabled";
     }
 
-    IDevice* device = this->device();
     auto mesh_device = devices_.at(0);
     auto& cq = mesh_device->mesh_command_queue();
     int num_programs = 0;
     const CoreRangeSet worker_cores{CoreRange(CoreCoord{0, 0}, CoreCoord{1, 1})};
 
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
     auto initial = telemetry.read_info();
     ASSERT_TRUE(initial.has_value());
     ASSERT_FALSE(initial->info_cqs.empty());
@@ -542,12 +566,11 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchCoreProgramCountForTraceReplay) {
 }
 
 TEST_F(DispatchTelemetryReadApiTest, PrefetchCommandCountIncrementsAfterProgramRuns) {
-    IDevice* device = this->device();
     auto& cq = devices_.at(0)->mesh_command_queue();
     constexpr size_t num_blank_programs = 4;
     const CoreRangeSet worker_cores{CoreRange(CoreCoord{0, 0}, CoreCoord{1, 1})};
 
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
     auto initial = telemetry.read_info();
     ASSERT_TRUE(initial.has_value());
     ASSERT_FALSE(initial->info_cqs.empty());
@@ -571,11 +594,10 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchCoreEfficiencyIsNulloptWhenWorkerDi
     }
 
     // Create the device, single-core stream, blank program, and telemetry object.
-    IDevice* device = this->device();
     auto& cq = devices_.at(0)->mesh_command_queue();
     const CoreRangeSet worker_core{CoreRange(CoreCoord{0, 0})};
     Program program = create_blank_program(worker_core);
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
 
     // Run the blank program.
     distributed::MeshWorkload workload;
@@ -595,11 +617,10 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchUtilizationIsEmptyWhenWorkerDispatc
     }
 
     // Create the device, single-core stream, blank program, and telemetry object.
-    IDevice* device = this->device();
     auto& cq = devices_.at(0)->mesh_command_queue();
     const CoreRangeSet worker_core{CoreRange(CoreCoord{0, 0})};
     Program program = create_blank_program(worker_core);
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
 
     // Run the blank program.
     distributed::MeshWorkload workload;
@@ -621,7 +642,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, WorkerWaitReportsUpstreamBlockedState) {
     const CoreCoord worker_core{0, 0};
     reset_worker_l1_state(worker_core);
 
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
     auto initial = telemetry.read_info();
     ASSERT_TRUE(initial.has_value());
     ASSERT_FALSE(initial->info_cqs.empty());
@@ -687,10 +708,10 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchSTelemetryCurrentTimestampAdvances)
         GTEST_SKIP() << "Requires worker dispatch and dispatch_s to be enabled";
     }
 
-    auto first = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto first = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
     ASSERT_TRUE(first.has_value());
 
-    auto second = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto second = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
     ASSERT_TRUE(second.has_value());
     EXPECT_GT(second->current_timestamp, first->current_timestamp);
 }
@@ -716,7 +737,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksWorkerRuntime) {
 
     EXPECT_TRUE(worker_reached_l1_wait(device(), worker_core));
     {
-        auto info = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+        auto info = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
         ASSERT_TRUE(info.has_value());
         EXPECT_GT(info->workers_per_sub_device[0], 0);
         EXPECT_GT(info->current_timestamp, 0);
@@ -727,7 +748,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksWorkerRuntime) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     {
-        auto info = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+        auto info = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
         ASSERT_TRUE(info.has_value());
         EXPECT_GT(info->workers_per_sub_device[0], 0);
         EXPECT_GT(info->current_timestamp, 0);
@@ -766,7 +787,7 @@ TEST_F(DispatchTelemetryReadApiTest, DispatchTelemetryTracksWorkersPerSubDeviceC
     auto sub_device_manager = mesh_device->create_sub_device_manager({sub_devices[0], sub_devices[1]}, 3200);
     mesh_device->load_sub_device_manager(sub_device_manager);
 
-    auto info = read_dispatch_core_telemetry(device()->id(), *dispatch_telemetry_core);
+    auto info = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_telemetry_core));
     EXPECT_TRUE(info.has_value());
     if (info.has_value()) {
         for (size_t sub_device_index = 0; sub_device_index < num_sub_devices; ++sub_device_index) {
@@ -835,7 +856,8 @@ TEST_F(DispatchTelemetryMultiCQReadApiTest, DispatchTelemetryTracksWorkersPerSub
         3200);
     mesh_device->load_sub_device_manager(sub_device_manager);
 
-    auto first_info = read_dispatch_core_telemetry(device()->id(), *first_dispatch_telemetry_core);
+    auto first_info =
+        read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*first_dispatch_telemetry_core));
     EXPECT_TRUE(first_info.has_value());
     if (first_info.has_value()) {
         EXPECT_EQ(
@@ -846,7 +868,8 @@ TEST_F(DispatchTelemetryMultiCQReadApiTest, DispatchTelemetryTracksWorkersPerSub
             sub_device_core_counts[cq_1_second_sub_device_index]);
     }
 
-    auto second_info = read_dispatch_core_telemetry(device()->id(), *second_dispatch_telemetry_core);
+    auto second_info =
+        read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*second_dispatch_telemetry_core));
     EXPECT_TRUE(second_info.has_value());
     if (second_info.has_value()) {
         EXPECT_EQ(
@@ -898,7 +921,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryDoesNotOvercountComple
             return std::nullopt;
         }
 
-        auto while_working = read_dispatch_core_telemetry(device()->id(), dispatch_s_core);
+        auto while_working = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(dispatch_s_core));
         if (!while_working.has_value() || while_working->workers_per_sub_device[0] == 0 ||
             while_working->completion_count[0] >= while_working->workers_per_sub_device[0] ||
             while_working->last_work_launch_timestamp[0] == 0) {
@@ -924,7 +947,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryDoesNotOvercountComple
     Finish(cq);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    auto after_reset = read_dispatch_core_telemetry(device()->id(), dispatch_s_core);
+    auto after_reset = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(dispatch_s_core));
     ASSERT_TRUE(after_reset.has_value()) << "Telemetry was not readable after reset";
     ASSERT_TRUE(completion_counts_are_bounded(*after_reset))
         << "Telemetry completion count exceeded worker semaphore count after reset";
@@ -979,7 +1002,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksMultipleSubDevic
     }
     ASSERT_TRUE(first_started);
 
-    auto first_while_working = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto first_while_working = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
 
     release_worker(first_worker);
     Finish(cq);
@@ -990,7 +1013,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksMultipleSubDevic
     EXPECT_GT(first_while_working->last_work_launch_timestamp[0], 0);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    auto after_first_finish = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto after_first_finish = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
     ASSERT_TRUE(after_first_finish.has_value());
     EXPECT_GT(after_first_finish->workers_per_sub_device[0], 0);
     EXPECT_EQ(after_first_finish->completion_count[0], after_first_finish->workers_per_sub_device[0]);
@@ -1007,7 +1030,8 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksMultipleSubDevic
     }
     ASSERT_TRUE(second_started);
 
-    auto second_while_working = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto second_while_working =
+        read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
 
     release_worker(second_worker);
     Finish(cq);
@@ -1018,7 +1042,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchSTelemetryTracksMultipleSubDevic
     EXPECT_GT(second_while_working->last_work_launch_timestamp[1], 0);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    auto after_second_finish = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+    auto after_second_finish = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
     ASSERT_TRUE(after_second_finish.has_value());
     EXPECT_GT(after_second_finish->workers_per_sub_device[0], 0);
     EXPECT_GT(after_second_finish->workers_per_sub_device[1], 0);
@@ -1069,7 +1093,7 @@ TEST_F(DispatchTelemetryReadApiTest, LastWorkLaunchTimestampIncrementsPerSubDevi
     }
 
     const auto read_timestamps = [&]() {
-        auto info = read_dispatch_core_telemetry(device()->id(), *dispatch_s_core);
+        auto info = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
         EXPECT_TRUE(info.has_value());
         std::array<uint64_t, num_sub_devices> timestamps = {};
         if (info.has_value()) {
@@ -1175,7 +1199,7 @@ TEST_F(DispatchTelemetryReadApiTest, InactiveWorkersIncrementCompleteSem) {
     ASSERT_EQ(loaded_second_sub_device_cores.num_cores(), sub_device_core_count);
 
     const auto expect_completion_count_for_sub_device = [&](size_t sub_device_index, const char* case_name) {
-        auto info = read_dispatch_core_telemetry(device->id(), *dispatch_s_core);
+        auto info = read_dispatch_core_telemetry(tt_device(), noc0_core_from_virtual_core(*dispatch_s_core));
         ASSERT_TRUE(info.has_value());
         EXPECT_EQ(info->workers_per_sub_device[0], sub_device_core_count);
         EXPECT_EQ(info->workers_per_sub_device[1], sub_device_core_count);
@@ -1256,7 +1280,7 @@ TEST_F(DispatchTelemetryHostL1WaitTest, DispatchCoreEfficiencyAndUtilization) {
     const CoreRangeSet loaded_second_sub_device_cores =
         mesh_device->worker_cores(HalProgrammableCoreType::TENSIX, SubDeviceId{1});
 
-    DispatchTelemetry telemetry(*device);
+    DispatchTelemetry telemetry(tt_device());
 
     EXPECT_EQ(
         loaded_first_sub_device_cores.num_cores() + loaded_second_sub_device_cores.num_cores(),
