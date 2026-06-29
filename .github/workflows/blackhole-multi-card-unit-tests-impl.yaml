@@ -146,7 +146,7 @@ jobs:
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
     name: ${{ inputs.arch }} ${{ inputs.runner-label }} ${{ matrix.test-group.name }}
     runs-on:
-      - in-service
+      - oos-williamly-minfra-1071
       - arch-blackhole
       - ${{ inputs.runner-label }}
     container:
