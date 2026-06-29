@@ -434,7 +434,6 @@ class DeepSeekV4PreloadedExperts(DeepSeekV4Module):
             return self._decode_token(x_flat, routing_weights)
         else:
             assert False, "Prefill is computed by decode"
-            assert False, "Prefill is computed by decode"
 
     def decode_static(self, x_tok: ttnn.Tensor, routing_weights: ttnn.Tensor) -> ttnn.Tensor:
         """Trace-safe single-token routed FFN. ``x_tok`` ``[1,1,1,H]`` and
