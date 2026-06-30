@@ -82,6 +82,8 @@ def run_model(
     topology,
     gate_fallback_mode,
     request,
+    overlap_shared_expert_with_dispatch=True,
+    overlap_routed_expert_with_combine=True,
 ):
     """TtMoe PCC body — shared between `test_ds_moe` / `test_kimi_moe`.
 
@@ -89,6 +91,11 @@ def run_model(
     the variant's HF config. DSv3 values are a no-op; Kimi values switch the
     gate routing rule.
     """
+
+    # The routed-expert / combine overlap is only supported on Blackhole (TtMoe asserts this).
+    # Skip on non-Blackhole archs instead of hitting that assertion.
+    if overlap_routed_expert_with_combine and not is_blackhole():
+        pytest.skip("overlap_routed_expert_with_combine=True is only supported on Blackhole")
 
     # Scoped: only the linear-8 / 64-expert / HOST_ALL / pcc-check case OOMs without this.
     # Cached all-gather semaphores get placed at the wrong offset for that specific config.
@@ -324,6 +331,8 @@ def run_model(
         n_expert_groups=config.n_group,
         n_limited_groups=config.topk_group,
         route_scale=config.routed_scaling_factor,
+        overlap_shared_expert_with_dispatch=overlap_shared_expert_with_dispatch,
+        overlap_routed_expert_with_combine=overlap_routed_expert_with_combine,
     )
     ttnn.synchronize_device(mesh_device)
     profiler.end("tt_moe_creation")
@@ -665,6 +674,8 @@ def run_model(
     indirect=["mesh_device", "device_params"],
 )
 @pytest.mark.parametrize("variant", ["deepseek_v3_d_p"], indirect=True, ids=["deepseek_v3"])
+@pytest.mark.parametrize("overlap_shared_expert_with_dispatch", [True], ids=["overlap_shared"])
+@pytest.mark.parametrize("overlap_routed_expert_with_combine", [True], ids=["overlap_routed"])
 def test_ds_moe(
     variant,
     config_only,
@@ -680,6 +691,8 @@ def test_ds_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    overlap_shared_expert_with_dispatch,
+    overlap_routed_expert_with_combine,
     request,
 ):
     run_model(
@@ -698,6 +711,8 @@ def test_ds_moe(
         topology,
         gate_fallback_mode,
         request,
+        overlap_shared_expert_with_dispatch=overlap_shared_expert_with_dispatch,
+        overlap_routed_expert_with_combine=overlap_routed_expert_with_combine,
     )
 
 
@@ -762,6 +777,8 @@ def test_ds_moe(
     indirect=["mesh_device", "device_params"],
 )
 @pytest.mark.parametrize("variant", ["kimi_k2_6"], indirect=True, ids=["kimi"])
+@pytest.mark.parametrize("overlap_shared_expert_with_dispatch", [True], ids=["overlap_shared"])
+@pytest.mark.parametrize("overlap_routed_expert_with_combine", [True], ids=["overlap_routed"])
 def test_kimi_moe(
     variant,
     config_only,
@@ -777,6 +794,8 @@ def test_kimi_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    overlap_shared_expert_with_dispatch,
+    overlap_routed_expert_with_combine,
     request,
 ):
     run_model(
@@ -795,4 +814,6 @@ def test_kimi_moe(
         topology,
         gate_fallback_mode,
         request,
+        overlap_shared_expert_with_dispatch=overlap_shared_expert_with_dispatch,
+        overlap_routed_expert_with_combine=overlap_routed_expert_with_combine,
     )
