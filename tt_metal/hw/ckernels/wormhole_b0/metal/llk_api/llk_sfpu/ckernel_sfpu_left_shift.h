@@ -16,8 +16,11 @@ template <bool APPROXIMATION_MODE, int ITERATIONS = 8>
 inline void calculate_left_shift(const uint shift_amt) {
 #pragma GCC unroll 0
     for (int d = 0; d < ITERATIONS; d++) {
-        vInt v = dst_reg[0];
-        dst_reg[0] = v << shift_amt;
+        // Load/store as two's-complement int32 (sfpi DataLayout::I32 == InstrModLoadStore::INT32),
+        // matching the original TTI path. A plain vInt load would read the raw sign-magnitude dest
+        // bits and the shift would corrupt the sign bit for negative inputs.
+        vInt v = dst_reg[0].mode<sfpi::DataLayout::I32>();
+        dst_reg[0].mode<sfpi::DataLayout::I32>() = v << shift_amt;
         dst_reg++;
     }
 }
