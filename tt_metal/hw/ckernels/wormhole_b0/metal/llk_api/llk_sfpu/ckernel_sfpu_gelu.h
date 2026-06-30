@@ -311,7 +311,8 @@ inline void calculate_gelu() {
             sfpi::vFloat x = sfpi::dst_reg[0];
             sfpi::vFloat result = sfpi::vConst0;  // default 0 for x <= GELU_SAT
             v_if(x > GELU_SAT) {
-                sfpi::vFloat scaled = sfpi::min(x * INV_SQRT2, 10.0f);
+                sfpi::vFloat scaled = x * INV_SQRT2;
+                scaled = sfpi::min(scaled, 10.0f);
                 sfpi::vFloat x2 = scaled * scaled;
                 sfpi::vFloat erf_n, erf_d;
                 piecewise_rational_eval_parity_numer_denom<16, 16>(

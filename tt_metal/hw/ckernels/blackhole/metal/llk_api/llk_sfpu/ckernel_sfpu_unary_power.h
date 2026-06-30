@@ -149,6 +149,7 @@ sfpi_inline sfpi::vFloat _sfpu_unary_power_21f_(sfpi::vFloat base, sfpi::vFloat 
 }
 
 sfpi_inline sfpi::vFloat _sfpu_pow2_f32_accurate_(sfpi::vFloat z) {
+    // Handle underflow
     z = sfpi::max(z, -0x7e.ffff8p0f);
 
     sfpi::vInt k_int;

@@ -117,8 +117,7 @@ sfpi_inline sfpi::vFloat _sfpu_exp_21f_bf16_(sfpi::vFloat val) {
     // Intermediary values can overflow in xlog2 is outside of [0, 256[ which leads to invalid results instead of 0
     // (when input < -88.5) and +inf (when input > 88.5)
     // To avoid this, we clamp xlog2 to [0, 255]
-    // (thresholds values are rounded to bf16, as it does not change
-    // result but only requires one SFPLOADI vs. two)
+    // (thresholds values are rounded to bf16, as it does not change result but only requires one SFPLOADI vs. two)
     xlog2 = sfpi::clamp(xlog2, 0.0f, 255.0f);
 
     sfpi::vFloat z = sfpi::as<sfpi::vFloat>(_float_to_int32_for_exp_21f_(xlog2));

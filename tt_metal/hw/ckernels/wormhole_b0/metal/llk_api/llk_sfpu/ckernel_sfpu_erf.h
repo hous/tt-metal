@@ -76,7 +76,7 @@ inline void calculate_erf() {
         // Saturate to [-1, 1]: rational fit is not bounded and overshoots by
         // up to ~3e-8 (FP32) / ~2e-4 (BF16 LUT) in the tail. Persists in FP32
         // dest register and biases downstream ops (e.g. decomposed GELU in CLIP).
-        result = sfpi::clamp(result, -1.0f, 1.0f);
+        result = sfpi::clamp(result, -1.0f, +1.0f);
         sfpi::dst_reg[0] = result;
         sfpi::dst_reg++;
     }

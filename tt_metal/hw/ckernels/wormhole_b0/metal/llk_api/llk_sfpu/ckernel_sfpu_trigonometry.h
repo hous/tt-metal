@@ -849,7 +849,13 @@ inline void calculate_asinh() {
         tmp = _calculate_sqrt_body_<APPROXIMATION_MODE>(tmp);
         tmp = tmp + sfpi::abs(inp);
         auto res = _calculate_log_body_no_init_(tmp);
-        res = sfpi::abs(res);
+        // Although res = sfpi::abs(res) would be the simpler route,
+        // that causes edge_case test fails, because -0 is handled
+        // differently. (Even though we're in the -ffast-math domain,
+        // and so cannot rely on -0 and +0 being the same or being
+        // different). (I'm implying the test is wrong.)
+        v_if(inp < sfpi::vConst0) { res = -res; }
+        v_endif;
         sfpi::dst_reg[0] = res;
         sfpi::dst_reg++;
     }
