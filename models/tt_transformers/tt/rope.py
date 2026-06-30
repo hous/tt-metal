@@ -609,10 +609,13 @@ class HfRotarySetup(LightweightModule):
             )
         else:
             self.batch_size_per_device_group = self.original_batch_size
-        # Match RotarySetup: Wormhole Galaxy reports (8, 9) storage grid; decode rope shards use (8, 8).
-        self.core_grid = (
-            device.compute_with_storage_grid_size() if ttnn.get_arch_name() == "blackhole" else ttnn.CoreCoord(8, 8)
-        )
+        # Decode cos/sin must be height-sharded on the SAME core grid as the decode Q/K heads
+        # (see get_attn_create_head_output_mem_config), which is 8 cores wide on every arch.
+        # Using the full Blackhole storage grid here (e.g. 13 wide) lays the per-batch shards out
+        # row-wise at width 13, so batch slots >= 8 land on different cores than their Q/K heads
+        # and rotary_embedding_hf applies mismatched cos/sin to them (corrupting the RoPE'd K
+        # cache for batch > 8). Always use an 8-wide grid so the layouts match.
+        self.core_grid = ttnn.CoreCoord(8, 8)
 
         # Decode: ROW_MAJOR cache for embedding lookup (same numerics as prefill via get_rot_mats_hf).
         self.cos_matrix, self.sin_matrix = get_rot_mats_hf(
