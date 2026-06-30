@@ -305,11 +305,8 @@ TEST_F(ProgramSpecTestQuasar, DMKernelSelfLoopOnGen2Fails) {
     // The DFB's tile-counter credit machinery synchronizes a producer and a consumer on DISTINCT RISCs
     // via per-side masks, and a single DM kernel's producer and consumer masks are identical — the DFB
     // backend would reject it with an opaque "producer_risc_mask and consumer_risc_mask must not
-    // overlap". Caught up front at validation with an actionable message instead. The legal Gen2
-    // alternatives are a private L1 scratch buffer, a LocalTensorAccessor tensor view, or a two-kernel
-    // cross-bind. (On Gen1 a DM self-loop IS legal — a DFB lowers to a plain circular buffer there; see
-    // DMKernelSelfLoopOnGen1Succeeds. Compute self-loops stay legal on both gens — see
-    // DFBSelfLoopOnComputeKernelSucceeds.)
+    // overlap". Caught up front at validation with an actionable message instead.
+    // (Compute self-loops stay legal on both gens — see DFBSelfLoopOnComputeKernelSucceeds.)
     auto kernel = MakeMinimalDMKernel("kernel");
     auto dfb = MakeMinimalDFB("dfb");
     kernel.dfb_bindings.push_back(ProducerOf(DFBSpecName{"dfb"}, "p"));

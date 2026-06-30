@@ -1225,13 +1225,13 @@ void ValidateProgramSpec(const ProgramSpec& spec, const CollectedSpecData& colle
         }
 
         if (self_loop_kernel != nullptr) {
-            // A data-movement kernel may self-loop a DFB (bind it as both PRODUCER and CONSUMER) only
-            // on Gen1 (WH/BH), where a DFB lowers to a plain circular buffer that a single DM RISC can
-            // both fill and drain. On Gen2 the DFB's tile-counter credit machinery requires disjoint
-            // producer/consumer RISCs, so a DM self-loop cannot be lowered. Catch it here (with a clear
-            // message) rather than let it fall through to a confusing "producer_risc_mask and
-            // consumer_risc_mask must not overlap" error in the DFB backend. (Compute self-loops are
-            // always legal: they lower to the intra-Tensix packer->unpacker flow.)
+            // A kernel may self-loop a DFB (bind it as both PRODUCER and CONSUMER) if:
+            //   - it's a compute kernel (legal on any gen)
+            //   - it's a Gen1 DM kernel (legal ONLY on Gen1)
+            // DM self-loop is supported on Gen2. It will not be supported as there is no valid use case;
+            // a scratchpad or local tensor accessor should be used instead.
+            // Catch it here (with a clear message) rather than let it fall through to a more confusing
+            // error in the DFB backend.
             TT_FATAL(
                 !(is_gen2_arch() && self_loop_kernel->is_data_movement_kernel()),
                 "DataflowBuffer '{}' is self-looped by data-movement kernel '{}' (bound as both PRODUCER "
