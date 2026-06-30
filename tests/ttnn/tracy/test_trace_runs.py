@@ -34,7 +34,9 @@ def test_with_ops(device):
     # Ensure all binaries are compiled/loaded before starting trace capture.
     # Trace capture does not allow device writes (e.g. binary loading) on fast dispatch paths.
     ttnn.synchronize_device(device)
-    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    # core_grid matmul uses the auto-config path, which is not trace-safe by default; this profiler
+    # test asserts no numerics, so opt out of the safety check.
+    tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     for i in range(100):
         ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=8, x=8))
     ttnn.end_trace_capture(device, tid, cq_id=0)
@@ -73,7 +75,7 @@ def test_with_ops_single_core(device, capture_count, replay_count):
     ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=1, x=1))
     # Ensure all binaries are compiled/loaded before starting trace capture.
     ttnn.synchronize_device(device)
-    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     for i in range(capture_count):
         ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=1, x=1))
     ttnn.end_trace_capture(device, tid, cq_id=0)
@@ -116,7 +118,7 @@ def test_with_ops_multiple_trace_ids(device):
     ttnn.end_trace_capture(device, tid, cq_id=0)
     trace_ids.append(tid)
 
-    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     for _ in range(2):
         ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=8, x=8))
     ttnn.end_trace_capture(device, tid, cq_id=0)
@@ -160,7 +162,7 @@ def test_with_ops_trace_with_non_trace(device):
     trace_ids = []
     # Ensure all binaries are compiled/loaded before starting trace capture.
     ttnn.synchronize_device(device)
-    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     for _ in range(10):
         ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=8, x=8))
     ttnn.end_trace_capture(device, tid, cq_id=0)

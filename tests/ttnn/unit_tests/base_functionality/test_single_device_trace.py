@@ -93,7 +93,9 @@ def test_single_device_multi_trace(device, shape, blocking):
 
     # Capture Trace 0
     logger.info("Capture Trace 0")
-    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    # run_op_chain ends in a `@` matmul with no program_config (auto-config path), which is not
+    # trace-safe by default. L1 occupancy is unchanging across captures here, so opt out of the check.
+    tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     output_tensor = run_op_chain(input_0_dev, input_1_dev, weight_dev)
     ttnn.end_trace_capture(device, tid, cq_id=0)
 

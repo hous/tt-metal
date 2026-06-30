@@ -154,21 +154,23 @@ def test_multi_device_multi_trace(mesh_device, shape, enable_multi_cq):
     run_op_chain_1(input_0_dev, input_1_dev, weight_dev)
     run_op_chain_2(input_0_dev, input_1_dev, weight_dev)
 
+    # Each op chain ends in a `@` matmul with no program_config (auto-config path), which is not
+    # trace-safe by default. L1 occupancy is unchanging across captures here, so opt out of the check.
     # Capture Trace 0
     logger.info("Capture Trace 0")
-    tid = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq)
+    tid = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     output_tensor = run_op_chain(input_0_dev, input_1_dev, weight_dev)
     ttnn.end_trace_capture(mesh_device, tid, cq_id=trace_cq)
 
     # Capture Trace 1
     logger.info("Capture Trace 1")
-    tid_1 = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq)
+    tid_1 = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     output_tensor_1 = run_op_chain_1(input_0_dev, input_1_dev, weight_dev)
     ttnn.end_trace_capture(mesh_device, tid_1, cq_id=trace_cq)
 
     # Capture Trace 1
     logger.info("Capture Trace 2")
-    tid_2 = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq)
+    tid_2 = ttnn.begin_trace_capture(mesh_device, cq_id=trace_cq, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
     output_tensor_2 = run_op_chain_2(input_0_dev, input_1_dev, weight_dev)
     ttnn.end_trace_capture(mesh_device, tid_2, cq_id=trace_cq)
 

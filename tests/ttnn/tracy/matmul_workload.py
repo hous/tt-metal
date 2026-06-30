@@ -104,7 +104,9 @@ def main():
             ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=1, x=1))
             ttnn.synchronize_device(device)
 
-            tid = ttnn.begin_trace_capture(device, cq_id=0)
+            # These matmuls use core_grid (auto-config), which is not trace-safe by default.
+            # This profiler test exercises trace mechanics only, so opt out of the safety check.
+            tid = ttnn.begin_trace_capture(device, cq_id=0, policy=ttnn.TracePolicy.ALLOW_UNSTABLE_CACHE)
             for _ in range(50):
                 ttnn.matmul(a, b, core_grid=ttnn.CoreGrid(y=1, x=1))
             ttnn.end_trace_capture(device, tid, cq_id=0)
