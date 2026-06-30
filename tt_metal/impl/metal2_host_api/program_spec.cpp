@@ -2569,6 +2569,16 @@ experimental::quasar::QuasarComputeConfig MakeQuasarComputeConfig(
     std::vector<UnpackToDestMode> unpack_modes =
         BuildUnpackToDestModeVector(compute_config.unpack_to_dest_mode, dfb_name_to_id);
 
+    // Quasar explicit unpack-to-dest flag. It must be visible BEFORE llk_defs.h is first included
+    // (which happens via ckernel.h): llk_defs.h is #pragma once and bakes `constexpr UnpackToDestEn`
+    // at first inclusion, so a define emitted later (e.g. into chlkc_descriptors.h) would be too late.
+    // Routing it through the kernel defines map emits it into defines_generated.h (prolog) and as a
+    // -D flag, both ahead of ckernel.h. (WH/BH never set this, so they are unaffected.)
+    std::map<std::string, std::string> compute_defines = to_defines_map(kernel_spec.compiler_options.defines);
+    if (compute_config.unpack_to_dest_en) {
+        compute_defines["UNPACK_TO_DEST_EN"] = "1";
+    }
+
     return experimental::quasar::QuasarComputeConfig{
         .num_threads_per_cluster = kernel_spec.num_threads,
         .math_fidelity = compute_config.math_fidelity,
@@ -2579,7 +2589,7 @@ experimental::quasar::QuasarComputeConfig MakeQuasarComputeConfig(
         .math_approx_mode = compute_config.math_approx_mode,
         .enable_2x_src_format = compute_config.enable_2x_src_format,
         .compile_args = {},  // Compile args are passed via named_compile_args
-        .defines = to_defines_map(kernel_spec.compiler_options.defines),
+        .defines = std::move(compute_defines),
         .named_compile_args = to_named_compile_args_map(kernel_spec.compile_time_args),
         .opt_level = kernel_spec.compiler_options.opt_level,
         .compiler_include_paths = kernel_spec.compiler_options.include_paths,

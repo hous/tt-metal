@@ -128,7 +128,13 @@ enum class MathFidelity : std::uint8_t
     HiFi4 = 4
 };
 
-constexpr bool UnpackToDestEn  = true;
+// Quasar: explicit op-writer unpack-to-dest flag. Default off; set true by the host via the
+// UNPACK_TO_DEST_EN define (emitted from ComputeHardwareConfig::unpack_to_dest_en). Op writers may
+// also set/clear it directly. (WH/BH keep this hardcoded true and infer routing from 32-bit format.)
+#ifndef UNPACK_TO_DEST_EN
+#define UNPACK_TO_DEST_EN 0
+#endif
+constexpr bool UnpackToDestEn = (UNPACK_TO_DEST_EN != 0);
 constexpr bool UnpackToDestDis = false;
 
 enum class StochRndType : std::uint8_t
