@@ -184,6 +184,91 @@ TEST_F(ProgramSpecHWTest, DFBAccessorNameLoopback) {
 }
 
 // ============================================================================
+// DM Self-Loop Loopback Test (Gen1)
+// ============================================================================
+//
+// Proves that a single DM kernel may self-loop a DFB on real WH/BH hardware: the kernel binds one
+// DFB as both PRODUCER and CONSUMER (shared self-loop-pair accessor name) and both fills and drains
+// it. On Gen1 a DFB is a plain circular buffer, so one engine's reserve->push->wait->pop is
+// well-defined. This is the on-silicon counterpart to the host-side DMKernelSelfLoopOnGen1Succeeds
+// unit test — the case spec validation now permits on Gen1 (and rejects on Gen2).
+//
+// Pipeline (one BRISC kernel):
+//   Host writes known data → DRAM input buffer
+//   Self-loop kernel: per entry, DRAM → DFB (reserve/read/push) → DRAM (wait/write/pop)
+//   Host reads DRAM output buffer and verifies match
+
+TEST_F(ProgramSpecHWTest, DMSelfLoopLoopback) {
+    auto mesh_device = devices_.at(0);
+    IDevice* device = mesh_device->get_devices()[0];
+
+    constexpr uint32_t entry_size = 1024;  // bytes per DFB entry
+    constexpr uint32_t num_entries = 4;    // DFB depth
+    constexpr uint32_t num_transfers = 8;  // total entries to move through the DFB
+    constexpr uint32_t total_bytes = entry_size * num_transfers;
+
+    const NodeCoord node{0, 0};
+
+    InterleavedBufferConfig dram_config{
+        .device = device, .size = total_bytes, .page_size = total_bytes, .buffer_type = BufferType::DRAM};
+    auto input_buffer = CreateBuffer(dram_config);
+    auto output_buffer = CreateBuffer(dram_config);
+
+    ProgramSpec spec;
+    spec.name = "dfb_self_loop_loopback";
+
+    // One DM kernel that both fills and drains the DFB.
+    auto kernel = MakeMinimalGen1DMKernel("kernel", DataMovementProcessor::RISCV_0);
+    kernel.source = "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_self_loop_loopback.cpp";
+    kernel.advanced_options.num_runtime_varargs = 4;
+
+    // Self-loop pair: the same DFB bound as both PRODUCER and CONSUMER under a shared accessor name.
+    auto dfb = MakeMinimalDFB("scratch", entry_size, num_entries);
+    dfb.data_format_metadata = tt::DataFormat::Float16_b;
+    kernel.dfb_bindings.push_back(ProducerOf(DFBSpecName{"scratch"}, "scratch"));
+    kernel.dfb_bindings.push_back(ConsumerOf(DFBSpecName{"scratch"}, "scratch"));
+
+    spec.kernels = {kernel};
+    spec.dataflow_buffers = {dfb};
+    spec.work_units = std::vector<WorkUnitSpec>{MakeMinimalWorkUnit("work_unit_0", node, {"kernel"})};
+
+    Program program = MakeProgramFromSpec(*mesh_device, spec);
+
+    ProgramRunArgs params;
+    params.kernel_run_args = {
+        ProgramRunArgs::KernelRunArgs{
+            .kernel = KernelSpecName{"kernel"},
+            .advanced_options =
+                AdvancedKernelRunArgs{
+                    .runtime_varargs =
+                        {{node,
+                          {
+                              input_buffer->address(),
+                              output_buffer->address(),
+                              0u,  // bank_id (single-page buffer → bank 0)
+                              num_transfers,
+                          }}},
+                },
+        },
+    };
+    SetProgramRunArgs(program, params);
+
+    std::vector<uint32_t> input_data(total_bytes / sizeof(uint32_t));
+    for (size_t i = 0; i < input_data.size(); i++) {
+        input_data[i] = static_cast<uint32_t>(i);
+    }
+    detail::WriteToBuffer(input_buffer, input_data);
+
+    detail::LaunchProgram(device, program);
+
+    std::vector<uint32_t> output_data;
+    detail::ReadFromBuffer(output_buffer, output_data);
+
+    ASSERT_EQ(output_data.size(), input_data.size());
+    EXPECT_EQ(output_data, input_data);
+}
+
+// ============================================================================
 // Named RTA / CRTA / CTA Loopback Test
 // ============================================================================
 //
