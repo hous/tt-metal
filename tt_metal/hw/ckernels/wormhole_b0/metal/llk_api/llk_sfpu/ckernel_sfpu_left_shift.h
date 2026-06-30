@@ -20,7 +20,8 @@ inline void calculate_left_shift(const uint shift_amt) {
         // matching the original TTI path. A plain vInt load would read the raw sign-magnitude dest
         // bits and the shift would corrupt the sign bit for negative inputs.
         vInt v = dst_reg[0].mode<sfpi::DataLayout::I32>();
-        dst_reg[0].mode<sfpi::DataLayout::I32>() = v << shift_amt;
+        // WH has no arithmetic shift, so a logical shift must be requested explicitly.
+        dst_reg[0].mode<sfpi::DataLayout::I32>() = sfpi::shft(v, static_cast<int>(shift_amt), sfpi::ShiftMode::Logical);
         dst_reg++;
     }
 }
