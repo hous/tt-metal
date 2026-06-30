@@ -21,7 +21,7 @@ sfpi_inline sfpi::vFloat _sfpu_neg_exp_f32_(sfpi::vFloat val) {
     sfpi::vFloat z = val * sfpi::vConstFloatPrgm0;
 
     // Clamp z to -126.5: exp(x) underflows to 0 for large negative x
-    z = sfpi::max(UNDERFLOW_THRESHOLD, z);
+    z = sfpi::max(z, UNDERFLOW_THRESHOLD);
 
     // Round z to nearest integer using round-to-nearest
     sfpi::vInt k_int;
